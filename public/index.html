@@ -159,6 +159,7 @@ tr.over-capacity:hover { background: #ffeeba; }
   <div class="tab" data-tab="cleanings">🧹 清洁排期</div>
   <div class="tab" data-tab="holidays">🎄 节假日</div>
   <div class="tab" data-tab="stats">📊 统计报表</div>
+  <div class="tab" data-tab="host">💼 房东对账</div>
 </div>
 
 <div class="content">
@@ -285,6 +286,38 @@ tr.over-capacity:hover { background: #ffeeba; }
         <div class="stats-grid stats-grid-6" id="financeOverview"></div>
         <div id="financeTable"></div>
       </div>
+    </div>
+  </div>
+
+  <div class="page" id="page-host">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>房东月度对账报表</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select id="hostYear" onchange="loadHostReport()"></select>
+          <select id="hostMonth" onchange="loadHostReport()">
+            <option value="1">1月</option><option value="2">2月</option><option value="3">3月</option>
+            <option value="4">4月</option><option value="5">5月</option><option value="6">6月</option>
+            <option value="7">7月</option><option value="8">8月</option><option value="9">9月</option>
+            <option value="10">10月</option><option value="11">11月</option><option value="12">12月</option>
+          </select>
+          <button class="btn btn-success" onclick="exportHostReportCSV()">📥 导出 CSV</button>
+        </div>
+      </div>
+
+      <div id="hostRefundTiers" style="margin-bottom:16px;padding:12px;background:#f8f9fa;border-radius:4px;font-size:13px;"></div>
+
+      <div class="stats-grid stats-grid-6" id="hostOverview"></div>
+
+      <div style="margin-top:20px;margin-bottom:12px;">
+        <h4 style="font-size:15px;color:#333;">📊 按房源汇总</h4>
+      </div>
+      <div id="hostRoomsTable"></div>
+
+      <div style="margin-top:24px;margin-bottom:12px;">
+        <h4 style="font-size:15px;color:#333;">📋 订单明细</h4>
+      </div>
+      <div id="hostOrdersTable"></div>
     </div>
   </div>
 
@@ -605,6 +638,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'cleanings') loadCleanings();
     if (tab.dataset.tab === 'holidays') loadHolidays();
     if (tab.dataset.tab === 'stats') { if (currentStatsSubtab === 'occupancy') loadStats(); else loadFinanceStats(); }
+    if (tab.dataset.tab === 'host') { initHostYearSelect(); loadHostReport(); loadRefundTiers(); }
   });
 });
 
@@ -1902,6 +1936,149 @@ async function loadCleanerList() {
       }
     }
   } catch (e) {}
+}
+
+async function loadRefundTiers() {
+  try {
+    const data = await api('/api/refund/tiers');
+    let html = `<strong>📌 退款规则（平台抽成 ${data.platform_fee_rate}%）：</strong> `;
+    html += data.tiers.map(t => `${t.description}（退${t.rate}%）`).join(' | ');
+    $('hostRefundTiers').innerHTML = html;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function initHostYearSelect() {
+  const now = new Date();
+  const curYear = now.getFullYear();
+  const sel = $('hostYear');
+  if (sel.options.length > 0) return;
+  for (let y = curYear - 2; y <= curYear + 1; y++) {
+    sel.innerHTML += `<option value="${y}" ${y === curYear ? 'selected' : ''}>${y}年</option>`;
+  }
+  $('hostMonth').value = now.getMonth() + 1;
+}
+
+async function loadHostReport() {
+  try {
+    const year = parseInt($('hostYear').value);
+    const month = parseInt($('hostMonth').value);
+    const report = await api(`/api/host/report/monthly?year=${year}&month=${month}`);
+    renderHostOverview(report.total, report.platform_fee_rate);
+    renderHostRoomsTable(report.rooms);
+    renderHostOrdersTable(report.orders);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderHostOverview(total, feeRate) {
+  const html = `
+    <div class="stat-card">
+      <div class="value">${total.order_count}</div>
+      <div class="label">总订单数</div>
+    </div>
+    <div class="stat-card">
+      <div class="value danger">${total.cancelled_count}</div>
+      <div class="label">取消订单</div>
+    </div>
+    <div class="stat-card">
+      <div class="value">¥${total.total_price_yuan.toFixed(2)}</div>
+      <div class="label">订单总金额</div>
+    </div>
+    <div class="stat-card">
+      <div class="value danger">-¥${total.total_refund_yuan.toFixed(2)}</div>
+      <div class="label">实退总金额</div>
+    </div>
+    <div class="stat-card">
+      <div class="value">¥${total.total_platform_fee_yuan.toFixed(2)}</div>
+      <div class="label">平台抽成（${feeRate}%）</div>
+    </div>
+    <div class="stat-card">
+      <div class="value success">¥${total.total_host_payout_yuan.toFixed(2)}</div>
+      <div class="label">房东实得</div>
+    </div>
+  `;
+  $('hostOverview').innerHTML = html;
+}
+
+function renderHostRoomsTable(rooms) {
+  if (rooms.length === 0) {
+    $('hostRoomsTable').innerHTML = '<div class="empty">暂无数据</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>房源</th><th>订单数</th><th>取消数</th><th>订单总金额</th><th>实退总金额</th><th>平台总抽成</th><th>房东总实得</th></tr></thead><tbody>';
+  for (const r of rooms) {
+    html += `<tr>
+      <td><strong>${r.room_name}</strong></td>
+      <td>${r.order_count}</td>
+      <td>${r.cancelled_count}</td>
+      <td>¥${r.total_price_yuan.toFixed(2)}</td>
+      <td style="color:#e53935;">-¥${r.total_refund_yuan.toFixed(2)}</td>
+      <td>¥${r.total_platform_fee_yuan.toFixed(2)}</td>
+      <td style="color:#43a047;font-weight:bold;">¥${r.total_host_payout_yuan.toFixed(2)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('hostRoomsTable').innerHTML = html;
+}
+
+function renderHostOrdersTable(orders) {
+  if (orders.length === 0) {
+    $('hostOrdersTable').innerHTML = '<div class="empty">暂无订单</div>';
+    return;
+  }
+  const statusMap = {
+    pending: ['待确认', 'status-pending'],
+    confirmed: ['已确认', 'status-confirmed'],
+    checked_in: ['入住中', 'status-checked_in'],
+    checked_out: ['已退房', 'status-checked_out'],
+    cancelled: ['已取消', 'status-cancelled'],
+  };
+  let html = '<table><thead><tr><th>订单ID</th><th>房源</th><th>客人</th><th>入住</th><th>退房</th><th>晚数</th><th>订单金额</th><th>实退金额</th><th>平台抽成</th><th>房东实得</th><th>退款档位</th><th>状态</th></tr></thead><tbody>';
+  for (const o of orders) {
+    const [statusText, statusClass] = statusMap[o.status] || [o.status, ''];
+    const refundStyle = o.status === 'cancelled' ? 'color:#e53935;' : '';
+    html += `<tr>
+      <td>#${o.order_id}</td>
+      <td>${o.room_name}</td>
+      <td>${o.guest_name}</td>
+      <td>${o.check_in}</td>
+      <td>${o.check_out}</td>
+      <td>${o.nights}晚</td>
+      <td>¥${o.total_price_yuan.toFixed(2)}</td>
+      <td style="${refundStyle}">${o.status === 'cancelled' ? '-¥' + o.refund_amount_yuan.toFixed(2) : '-'}</td>
+      <td>¥${o.platform_fee_yuan.toFixed(2)}</td>
+      <td style="color:#43a047;font-weight:bold;">¥${o.host_payout_yuan.toFixed(2)}</td>
+      <td><span class="badge badge-info">${o.refund_tier_description}</span></td>
+      <td><span class="status ${statusClass}">${statusText}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('hostOrdersTable').innerHTML = html;
+}
+
+async function exportHostReportCSV() {
+  try {
+    const year = parseInt($('hostYear').value);
+    const month = parseInt($('hostMonth').value);
+    const res = await fetch(`/api/host/report/monthly/export?year=${year}&month=${month}`);
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || '导出失败');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `host_report_${year}_${String(month).padStart(2, '0')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('导出成功');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 async function init() {

@@ -27,6 +27,8 @@ const {
   refundDeposit,
   getMonthlyFinanceReport,
   exportMonthlyFinanceCSV,
+  getHostMonthlyReport,
+  exportHostMonthlyReportCSV,
   addGuest,
   updateGuest,
   deleteGuest,
@@ -354,7 +356,11 @@ app.post('/api/orders', async (c) => {
 app.post('/api/orders/:id/cancel', async (c) => {
   const id = parseInt(c.req.param('id'));
   try {
-    const result = cancelOrder(id);
+    let body = {};
+    try {
+      body = await c.req.json();
+    } catch (e) {}
+    const result = cancelOrder(id, body.cancel_date);
     const updated = db.prepare(`
       SELECT o.*, r.name as room_name
       FROM orders o
@@ -639,6 +645,46 @@ app.get('/api/stats/finance/monthly/export', (c) => {
   } catch (e) {
     return c.json({ error: e.message }, 400);
   }
+});
+
+app.get('/api/host/report/monthly', (c) => {
+  const { year, month } = c.req.query();
+  const now = new Date();
+  const y = year ? parseInt(year) : now.getFullYear();
+  const m = month ? parseInt(month) : now.getMonth() + 1;
+
+  try {
+    const report = getHostMonthlyReport(y, m);
+    return c.json(report);
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.get('/api/host/report/monthly/export', (c) => {
+  const { year, month } = c.req.query();
+  const now = new Date();
+  const y = year ? parseInt(year) : now.getFullYear();
+  const m = month ? parseInt(month) : now.getMonth() + 1;
+
+  try {
+    const csv = exportHostMonthlyReportCSV(y, m);
+    const filename = `host_report_${y}_${String(m).padStart(2, '0')}.csv`;
+    return c.body(csv, 200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.get('/api/refund/tiers', (c) => {
+  const { getAllRefundTiers } = require('./services/refund_policy');
+  return c.json({
+    tiers: getAllRefundTiers(),
+    platform_fee_rate: 10,
+  });
 });
 
 app.use('/*', serveStatic({ root: path.join(__dirname, 'public') }));

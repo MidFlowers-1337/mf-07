@@ -1,5 +1,14 @@
 const Database = require('better-sqlite3');
 const path = require('path');
+const {
+  calculateRefund,
+  calculateRefundForLegacyOrder,
+  calculateHostPayout,
+  determineRefundTier,
+  REFUND_TIERS,
+  PLATFORM_FEE_RATE,
+  getRefundTierInfo,
+} = require('./services/refund_policy');
 
 const dbPath = path.join(__dirname, 'data.db');
 const db = new Database(dbPath);
@@ -86,6 +95,13 @@ function initDb() {
   try { db.exec('ALTER TABLE rooms ADD COLUMN deposit_amount_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
   try { db.exec('ALTER TABLE orders ADD COLUMN deposit_amount_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
 
+  try { db.exec('ALTER TABLE orders ADD COLUMN refund_tier TEXT'); } catch (e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN refund_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cancel_fee_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN platform_fee_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN host_payout_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN refund_processed INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+
   try {
     db.exec(`
       CREATE TABLE IF NOT EXISTS guests (
@@ -145,7 +161,12 @@ function strToDate(s) {
 }
 
 function addDays(dateStr, days) {
-  const d = strToDate(dateStr);
+  let d;
+  if (dateStr instanceof Date) {
+    d = new Date(dateStr);
+  } else {
+    d = strToDate(dateStr);
+  }
   d.setDate(d.getDate() + days);
   return dateToStr(d);
 }
@@ -228,20 +249,19 @@ function calculatePrice(room, checkIn, checkOut) {
 }
 
 function calcCancelFee(room, checkIn, checkOut, cancelDate) {
-  const daysUntilCheckIn = diffDays(cancelDate, checkIn);
   const { total } = calculatePrice(room, checkIn, checkOut);
+  const totalCents = yuanToFen(total);
+  const result = calculateRefund(totalCents, checkIn, cancelDate);
 
-  if (daysUntilCheckIn >= 7) {
-    return { fee: 0, refund: total, rule: '提前7天以上，全额退款' };
-  } else if (daysUntilCheckIn >= 3) {
-    const fee = Math.round(total * 0.5);
-    return { fee, refund: total - fee, rule: '提前3-7天，收取50%违约金' };
-  } else if (daysUntilCheckIn >= 1) {
-    const fee = Math.round(total * 0.8);
-    return { fee, refund: total - fee, rule: '提前1-3天，收取80%违约金' };
-  } else {
-    return { fee: total, refund: 0, rule: '当天或入住后，不予退款' };
-  }
+  return {
+    fee: fenToYuan(result.cancel_fee_cents),
+    refund: fenToYuan(result.refund_cents),
+    rule: result.description,
+    tier: result.tier,
+    fee_cents: result.cancel_fee_cents,
+    refund_cents: result.refund_cents,
+    total_cents: result.total_price_cents,
+  };
 }
 
 function checkCollision(roomId, checkIn, checkOut, excludeOrderId = null) {
@@ -331,7 +351,7 @@ function addPayment(orderId, amountCents, type, method, note = '') {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) throw new Error('订单不存在');
 
-  const validTypes = ['room_fee', 'deposit', 'deposit_refund'];
+  const validTypes = ['room_fee', 'deposit', 'deposit_refund', 'room_fee_refund'];
   if (!validTypes.includes(type)) throw new Error('付款类型无效');
 
   const validMethods = ['wechat', 'cash'];
@@ -458,26 +478,40 @@ function refundDeposit(orderId, refundCents, deductedCents, deductionNote, metho
   return { refund_cents: refundCents, deducted_cents: deductedCents };
 }
 
-function cancelOrder(orderId) {
+function cancelOrder(orderId, cancelDate) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) throw new Error('订单不存在');
   if (order.status === 'cancelled') throw new Error('订单已取消');
+  if (order.refund_processed === 1) throw new Error('退款已处理，请勿重复操作');
+  
+  const currentDate = dateToStr(new Date());
+  const actualCancelDate = cancelDate || currentDate;
 
   const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(order.room_id);
-  const today = dateToStr(new Date());
-  const { fee, refund, rule } = calcCancelFee(room, order.check_in, order.check_out, today);
+  const totalPriceCents = yuanToFen(Number(order.total_price));
+
+  const refundResult = calculateRefund(totalPriceCents, order.check_in, actualCancelDate);
+
+  const hostPayoutResult = calculateHostPayout(totalPriceCents, refundResult.refund_cents);
 
   const fin = getOrderFinance(orderId);
-  const depositRefund = fin.deposit_net_cents;
-  const totalRefund = refund + fenToYuan(depositRefund);
+  const depositRefundCents = fin.deposit_net_cents;
+  const totalRefundCents = refundResult.refund_cents + depositRefundCents;
+  const totalRefundYuan = fenToYuan(totalRefundCents);
 
   const updateOrder = db.prepare(`
     UPDATE orders SET
       status = 'cancelled',
       cancel_fee = ?,
       refund_amount = ?,
+      refund_tier = ?,
+      refund_cents = ?,
+      cancel_fee_cents = ?,
+      platform_fee_cents = ?,
+      host_payout_cents = ?,
+      refund_processed = 1,
       updated_at = datetime('now', 'localtime')
-    WHERE id = ?
+    WHERE id = ? AND refund_processed = 0
   `);
 
   const deleteDates = db.prepare('DELETE FROM room_dates WHERE order_id = ?');
@@ -487,27 +521,63 @@ function cancelOrder(orderId) {
     UPDATE cleanings SET status = 'cancelled' WHERE order_id = ?
   `);
 
-  db.transaction(() => {
-    updateOrder.run(fee, totalRefund, orderId);
+  const insertRoomFeeRefund = db.prepare(`
+    INSERT INTO payments (order_id, amount_cents, type, method, note)
+    VALUES (?, ?, 'room_fee_refund', 'wechat', ?)
+  `);
+
+  const insertDepositRefund = db.prepare(`
+    INSERT INTO payments (order_id, amount_cents, type, method, note)
+    VALUES (?, ?, 'deposit_refund', 'wechat', ?)
+  `);
+
+  const result = db.transaction(() => {
+    const updateInfo = updateOrder.run(
+      fenToYuan(refundResult.cancel_fee_cents),
+      totalRefundYuan,
+      refundResult.tier,
+      refundResult.refund_cents,
+      refundResult.cancel_fee_cents,
+      hostPayoutResult.platform_fee_cents,
+      hostPayoutResult.host_payout_cents,
+      orderId
+    );
+
+    if (updateInfo.changes === 0) {
+      throw new Error('退款已处理，请勿重复操作');
+    }
+
     deleteDates.run(orderId);
     deleteGuests.run(orderId);
     cancelCleaning.run(orderId);
 
-    if (depositRefund > 0) {
-      db.prepare(`
-        INSERT INTO payments (order_id, amount_cents, type, method, note)
-        VALUES (?, ?, 'deposit_refund', 'wechat', ?)
-      `).run(orderId, depositRefund, '退订退还押金');
+    if (refundResult.refund_cents > 0) {
+      insertRoomFeeRefund.run(orderId, refundResult.refund_cents, `退订房费退款:${refundResult.description}`);
     }
+
+    if (depositRefundCents > 0) {
+      insertDepositRefund.run(orderId, depositRefundCents, '退订退还押金');
+    }
+
+    return {
+      fee: fenToYuan(refundResult.cancel_fee_cents),
+      refund: totalRefundYuan,
+      room_fee_refund: fenToYuan(refundResult.refund_cents),
+      deposit_refund: fenToYuan(depositRefundCents),
+      rule: refundResult.description,
+      tier: refundResult.tier,
+      fee_cents: refundResult.cancel_fee_cents,
+      refund_cents: totalRefundCents,
+      room_fee_refund_cents: refundResult.refund_cents,
+      deposit_refund_cents: depositRefundCents,
+      platform_fee_cents: hostPayoutResult.platform_fee_cents,
+      host_payout_cents: hostPayoutResult.host_payout_cents,
+      platform_fee_rate: hostPayoutResult.platform_fee_rate,
+      is_legacy: refundResult.is_legacy || false,
+    };
   })();
 
-  return {
-    fee,
-    refund: totalRefund,
-    room_fee_refund: refund,
-    deposit_refund: fenToYuan(depositRefund),
-    rule,
-  };
+  return result;
 }
 
 function getMonthlyFinanceReport(year, month) {
@@ -957,6 +1027,273 @@ function getOrderGuestSummary(orderId) {
   };
 }
 
+function getHostMonthlyReport(year, month) {
+  const y = parseInt(year);
+  const m = parseInt(month);
+  const monthStart = `${y}-${String(m).padStart(2, '0')}-01`;
+  const nextMonth = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+
+  const rooms = db.prepare('SELECT id, name FROM rooms ORDER BY id').all();
+  const roomMap = {};
+  for (const r of rooms) {
+    roomMap[r.id] = { room_id: r.id, room_name: r.name };
+  }
+
+  const orders = db.prepare(`
+    SELECT
+      o.id,
+      o.room_id,
+      o.guest_name,
+      o.check_in,
+      o.check_out,
+      o.nights,
+      o.total_price,
+      o.status,
+      o.cancel_fee,
+      o.refund_amount,
+      COALESCE(o.refund_tier, 'full') as refund_tier,
+      COALESCE(o.refund_cents, 0) as refund_cents,
+      COALESCE(o.cancel_fee_cents, 0) as cancel_fee_cents,
+      COALESCE(o.platform_fee_cents, 0) as platform_fee_cents,
+      COALESCE(o.host_payout_cents, 0) as host_payout_cents,
+      o.created_at,
+      r.name as room_name
+    FROM orders o
+    LEFT JOIN rooms r ON o.room_id = r.id
+    WHERE o.check_in >= ? AND o.check_in < ?
+    ORDER BY o.check_in DESC, o.id DESC
+  `).all(monthStart, nextMonth);
+
+  const paymentMap = {};
+  const paymentRows = db.prepare(`
+    SELECT order_id, type, SUM(amount_cents) as total
+    FROM payments
+    WHERE created_at >= ? AND created_at < ?
+    GROUP BY order_id, type
+  `).all(monthStart, nextMonth);
+
+  for (const pr of paymentRows) {
+    if (!paymentMap[pr.order_id]) {
+      paymentMap[pr.order_id] = { room_fee: 0, deposit: 0, deposit_refund: 0, room_fee_refund: 0 };
+    }
+    paymentMap[pr.order_id][pr.type] = Number(pr.total) || 0;
+  }
+
+  const orderList = orders.map(o => {
+    const totalPriceCents = yuanToFen(Number(o.total_price));
+    const refundCents = Number(o.refund_cents) || 0;
+    const platformFeeCents = Number(o.platform_fee_cents) || 0;
+    const hostPayoutCents = Number(o.host_payout_cents) || 0;
+    const paid = paymentMap[o.id] || { room_fee: 0, deposit: 0, deposit_refund: 0, room_fee_refund: 0 };
+
+    let effectivePlatformFeeCents = platformFeeCents;
+    let effectiveHostPayoutCents = hostPayoutCents;
+
+    if (o.status !== 'cancelled') {
+      const calc = calculateHostPayout(totalPriceCents, 0);
+      effectivePlatformFeeCents = calc.platform_fee_cents;
+      effectiveHostPayoutCents = calc.host_payout_cents;
+    } else if (platformFeeCents === 0 && hostPayoutCents === 0) {
+      const calc = calculateHostPayout(totalPriceCents, refundCents);
+      effectivePlatformFeeCents = calc.platform_fee_cents;
+      effectiveHostPayoutCents = calc.host_payout_cents;
+    }
+
+    return {
+      order_id: o.id,
+      room_id: o.room_id,
+      room_name: o.room_name,
+      guest_name: o.guest_name,
+      check_in: o.check_in,
+      check_out: o.check_out,
+      nights: o.nights,
+      status: o.status,
+      total_price_yuan: Number(o.total_price),
+      total_price_cents: totalPriceCents,
+      refund_amount_yuan: Number(o.refund_amount) || 0,
+      refund_amount_cents: refundCents,
+      cancel_fee_yuan: Number(o.cancel_fee) || 0,
+      cancel_fee_cents: Number(o.cancel_fee_cents) || 0,
+      platform_fee_yuan: fenToYuan(effectivePlatformFeeCents),
+      platform_fee_cents: effectivePlatformFeeCents,
+      host_payout_yuan: fenToYuan(effectiveHostPayoutCents),
+      host_payout_cents: effectiveHostPayoutCents,
+      refund_tier: o.refund_tier,
+      refund_tier_description: getRefundTierInfo(o.refund_tier).description,
+      created_at: o.created_at,
+      payments: {
+        room_fee_received_cents: paid.room_fee,
+        room_fee_refund_cents: paid.room_fee_refund,
+        deposit_received_cents: paid.deposit,
+        deposit_refund_cents: paid.deposit_refund,
+      },
+    };
+  });
+
+  const byRoom = {};
+  for (const r of rooms) {
+    byRoom[r.id] = {
+      room_id: r.id,
+      room_name: r.name,
+      order_count: 0,
+      cancelled_count: 0,
+      total_price_cents: 0,
+      total_refund_cents: 0,
+      total_platform_fee_cents: 0,
+      total_host_payout_cents: 0,
+    };
+  }
+
+  for (const o of orderList) {
+    const r = byRoom[o.room_id];
+    if (!r) continue;
+
+    r.order_count++;
+    if (o.status === 'cancelled') r.cancelled_count++;
+
+    r.total_price_cents += o.total_price_cents;
+    r.total_refund_cents += o.refund_amount_cents;
+    r.total_platform_fee_cents += o.platform_fee_cents;
+    r.total_host_payout_cents += o.host_payout_cents;
+  }
+
+  const roomSummary = rooms.map(r => {
+    const data = byRoom[r.id];
+    return {
+      ...data,
+      total_price_yuan: fenToYuan(data.total_price_cents),
+      total_refund_yuan: fenToYuan(data.total_refund_cents),
+      total_platform_fee_yuan: fenToYuan(data.total_platform_fee_cents),
+      total_host_payout_yuan: fenToYuan(data.total_host_payout_cents),
+    };
+  });
+
+  const total = {
+    order_count: roomSummary.reduce((s, r) => s + r.order_count, 0),
+    cancelled_count: roomSummary.reduce((s, r) => s + r.cancelled_count, 0),
+    total_price_cents: roomSummary.reduce((s, r) => s + r.total_price_cents, 0),
+    total_refund_cents: roomSummary.reduce((s, r) => s + r.total_refund_cents, 0),
+    total_platform_fee_cents: roomSummary.reduce((s, r) => s + r.total_platform_fee_cents, 0),
+    total_host_payout_cents: roomSummary.reduce((s, r) => s + r.total_host_payout_cents, 0),
+  };
+
+  total.total_price_yuan = fenToYuan(total.total_price_cents);
+  total.total_refund_yuan = fenToYuan(total.total_refund_cents);
+  total.total_platform_fee_yuan = fenToYuan(total.total_platform_fee_cents);
+  total.total_host_payout_yuan = fenToYuan(total.total_host_payout_cents);
+
+  return {
+    year: y,
+    month: m,
+    month_start: monthStart,
+    month_end: nextMonth,
+    platform_fee_rate: PLATFORM_FEE_RATE,
+    orders: orderList,
+    rooms: roomSummary,
+    total,
+  };
+}
+
+function exportHostMonthlyReportCSV(year, month) {
+  const report = getHostMonthlyReport(year, month);
+
+  let lines = [];
+  lines.push(`房东月度对账报表 - ${report.year}年${report.month}月`);
+  lines.push(`平台抽成比例: ${report.platform_fee_rate}%`);
+  lines.push('');
+
+  lines.push('=== 订单明细 ===');
+  lines.push([
+    '订单ID',
+    '房源',
+    '客人姓名',
+    '入住日期',
+    '退房日期',
+    '晚数',
+    '状态',
+    '订单金额(元)',
+    '实退金额(元)',
+    '平台抽成(元)',
+    '房东实得(元)',
+    '退款档位',
+    '创建时间',
+  ].map(escapeCSV).join(','));
+
+  for (const o of report.orders) {
+    const statusText = {
+      'pending': '待确认',
+      'confirmed': '已确认',
+      'checked_in': '已入住',
+      'checked_out': '已退房',
+      'cancelled': '已取消',
+    }[o.status] || o.status;
+
+    lines.push([
+      o.order_id,
+      o.room_name,
+      o.guest_name,
+      o.check_in,
+      o.check_out,
+      o.nights,
+      statusText,
+      o.total_price_yuan,
+      o.refund_amount_yuan,
+      o.platform_fee_yuan,
+      o.host_payout_yuan,
+      o.refund_tier_description,
+      o.created_at,
+    ].map(escapeCSV).join(','));
+  }
+
+  lines.push('');
+  lines.push('=== 按房源汇总 ===');
+  lines.push([
+    '房源',
+    '订单数',
+    '取消数',
+    '订单总金额(元)',
+    '实退总金额(元)',
+    '平台总抽成(元)',
+    '房东总实得(元)',
+  ].map(escapeCSV).join(','));
+
+  for (const r of report.rooms) {
+    lines.push([
+      r.room_name,
+      r.order_count,
+      r.cancelled_count,
+      r.total_price_yuan,
+      r.total_refund_yuan,
+      r.total_platform_fee_yuan,
+      r.total_host_payout_yuan,
+    ].map(escapeCSV).join(','));
+  }
+
+  lines.push('');
+  lines.push('=== 合计 ===');
+  lines.push([
+    '总订单数',
+    '总取消数',
+    '订单总金额(元)',
+    '实退总金额(元)',
+    '平台总抽成(元)',
+    '房东总实得(元)',
+  ].map(escapeCSV).join(','));
+  lines.push([
+    report.total.order_count,
+    report.total.cancelled_count,
+    report.total.total_price_yuan,
+    report.total.total_refund_yuan,
+    report.total.total_platform_fee_yuan,
+    report.total.total_host_payout_yuan,
+  ].map(escapeCSV).join(','));
+
+  lines.push('');
+  lines.push('导出时间,' + new Date().toLocaleString('zh-CN'));
+
+  return lines.join('\n');
+}
+
 module.exports = {
   db,
   initDb,
@@ -1001,4 +1338,6 @@ module.exports = {
   getGuests,
   getGuestFullIdNumber,
   getOrderGuestSummary,
+  getHostMonthlyReport,
+  exportHostMonthlyReportCSV,
 };
