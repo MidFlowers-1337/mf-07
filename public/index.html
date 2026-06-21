@@ -54,6 +54,9 @@ tr:hover { background: #f8f9fa; }
 tr.owed { background: #fff5f5; }
 tr.owed td { color: #c62828; }
 tr.owed:hover { background: #ffe5e5; }
+tr.over-capacity { background: #fff3cd; }
+tr.over-capacity td { color: #856404; }
+tr.over-capacity:hover { background: #ffeeba; }
 
 .status { padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
 .status-pending { background: #fff3cd; color: #856404; }
@@ -460,6 +463,79 @@ tr.owed:hover { background: #ffe5e5; }
   </div>
 </div>
 
+<div class="modal" id="guestsModal">
+  <div class="modal-content">
+    <h3 id="guestsModalTitle">入住人登记</h3>
+    <input type="hidden" id="guestsOrderId">
+    <div id="guestsList" style="margin-bottom: 16px;"></div>
+    <div id="addGuestForm" style="border-top: 1px solid #eee; padding-top: 16px;">
+      <h4 style="margin-bottom: 12px;">+ 添加入住人</h4>
+      <div class="form-row">
+        <div class="form-group">
+          <label>姓名 *</label>
+          <input type="text" id="newGuestName" placeholder="请输入姓名">
+        </div>
+        <div class="form-group">
+          <label>证件类型</label>
+          <select id="newGuestIdType" onchange="onIdTypeChange()">
+            <option value="id_card">身份证</option>
+            <option value="passport">护照</option>
+            <option value="hk_mo_taiwan">港澳台通行证</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>证件号 * <span class="tip">（粘贴身份证可自动解析出生日期和性别）</span></label>
+        <input type="text" id="newGuestIdNumber" placeholder="请输入证件号" onpaste="handleIdCardPaste(event)" oninput="handleIdCardInput()">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>出生日期</label>
+          <input type="date" id="newGuestBirthDate">
+        </div>
+        <div class="form-group">
+          <label>性别</label>
+          <select id="newGuestGender">
+            <option value="">请选择</option>
+            <option value="男">男</option>
+            <option value="女">女</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>手机号</label>
+          <input type="text" id="newGuestPhone" placeholder="请输入手机号">
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="newGuestIsPrimary"> 设为主客
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-default" onclick="closeGuestsModal()">关闭</button>
+        <button class="btn btn-primary" onclick="addNewGuest()">添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="confirmIdModal">
+  <div class="modal-content">
+    <h3>查看完整证件号</h3>
+    <p style="margin-bottom: 16px; color: #856404;">⚠️ 请注意保护客人隐私，完整证件号仅用于核对身份，请勿转发或泄露。</p>
+    <div style="padding: 12px; background: #f8f9fa; border-radius: 4px; margin-bottom: 16px;">
+      <div style="font-size: 14px; color: #666; margin-bottom: 4px;">确认查看以下客人的完整证件号：</div>
+      <div id="confirmGuestName" style="font-size: 16px; font-weight: bold;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeConfirmIdModal()">取消</button>
+      <button class="btn btn-danger" onclick="confirmShowFullId()">确认查看</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="holidayModal">
   <div class="modal-content">
     <h3>添加节假日</h3>
@@ -492,6 +568,9 @@ let calendarData = { orders: [], cleanings: [] };
 let holidaysCache = {};
 let currentStatsSubtab = 'occupancy';
 let currentDepositNet = 0;
+let currentGuestsOrder = null;
+let currentConfirmGuestId = null;
+let currentConfirmGuestName = '';
 
 function $(id) { return document.getElementById(id); }
 
@@ -938,12 +1017,16 @@ function renderOrdersTable(orders) {
     checked_out: ['已退房', 'status-checked_out'],
     cancelled: ['已取消', 'status-cancelled'],
   };
-  let html = '<table><thead><tr><th>ID</th><th>房源</th><th>客人</th><th>入住</th><th>退房</th><th>晚数</th><th>金额</th><th>收款进度</th><th>押金</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>ID</th><th>房源</th><th>客人</th><th>入住</th><th>退房</th><th>晚数</th><th>金额</th><th>入住人</th><th>收款进度</th><th>押金</th><th>状态</th><th>操作</th></tr></thead><tbody>';
   for (const o of orders) {
     const [statusText, statusClass] = statusMap[o.status] || [o.status, ''];
     const fin = o.finance || {};
+    const guests = o.guests || {};
     const hasOwed = (fin.total_owed_cents || 0) > 0 && o.status !== 'cancelled';
-    const rowClass = hasOwed ? 'owed' : '';
+    const isOver = guests.is_over;
+    let rowClass = '';
+    if (hasOwed) rowClass = 'owed';
+    else if (isOver) rowClass = 'over-capacity';
 
     let paymentBadge;
     if (o.status === 'cancelled') {
@@ -971,6 +1054,19 @@ function renderOrdersTable(orders) {
       depositBadge = `<span class="badge badge-warning">押金部分</span>`;
     }
 
+    const guestCount = guests.guest_count || 0;
+    const capacity = guests.capacity || '-';
+    let guestBadge;
+    if (o.status === 'cancelled') {
+      guestBadge = '<span class="badge badge-info">-</span>';
+    } else if (guests.is_over) {
+      guestBadge = `<span class="badge badge-danger">${guestCount}/${capacity}人 ⚠️</span>`;
+    } else if (guestCount === 0) {
+      guestBadge = `<span class="badge badge-warning">未登记</span>`;
+    } else {
+      guestBadge = `<span class="badge badge-info">${guestCount}/${capacity}人</span>`;
+    }
+
     html += `<tr class="${rowClass}">
       <td>#${o.id}</td>
       <td>${o.room_name}</td>
@@ -979,6 +1075,7 @@ function renderOrdersTable(orders) {
       <td>${o.check_out}</td>
       <td>${o.nights}晚</td>
       <td>¥${o.total_price}</td>
+      <td>${guestBadge}</td>
       <td>${paymentBadge}</td>
       <td>${depositBadge}</td>
       <td><span class="status ${statusClass}">${statusText}</span></td>
@@ -1004,6 +1101,33 @@ async function showOrderDetail(id) {
     const fin = o.finance || {};
     const payments = o.payments || [];
 
+    const guests = o.guests || { guests: [], guest_count: 0, capacity: 0, is_over: false };
+    const guestList = guests.guests || [];
+    const canEditGuests = !['checked_out', 'cancelled'].includes(o.status);
+
+    let guestsHtml = '';
+    if (guestList.length === 0) {
+      guestsHtml = '<div class="empty" style="padding: 20px;">未登记入住人</div>';
+    } else {
+      guestsHtml = '<table><thead><tr><th>姓名</th><th>证件类型</th><th>证件号</th><th>出生日期</th><th>性别</th><th>手机号</th></tr></thead><tbody>';
+      for (const g of guestList) {
+        const idDisplay = g.id_number ? g.id_number : '<span style="color:#999;">未填写</span>';
+        const isPrimary = g.is_primary ? '<span class="badge badge-primary" style="background:#1a73e8;color:#fff;">主客</span>' : '';
+        guestsHtml += `<tr>
+          <td><strong>${g.name}</strong> ${isPrimary}</td>
+          <td>${idTypeLabel(g.id_type)}</td>
+          <td>
+            ${idDisplay}
+            ${g.id_number ? `<button class="btn btn-default btn-sm" style="margin-left:4px;" onclick="showFullId(${g.id}, '${g.name.replace(/'/g, "\\'")}')">查看完整</button>` : ''}
+          </td>
+          <td>${g.birth_date || '-'}</td>
+          <td>${g.gender || '-'}</td>
+          <td>${g.phone || '-'}</td>
+        </tr>`;
+      }
+      guestsHtml += '</tbody></table>';
+    }
+
     let html = `
       <div style="font-size:14px;line-height:2;">
         <p><strong>订单号：</strong>#${o.id}</p>
@@ -1016,6 +1140,14 @@ async function showOrderDetail(id) {
         <p><strong>订单状态：</strong><span class="status status-${o.status}">${statusMap[o.status] || o.status}</span></p>
       </div>
     `;
+
+    html += `<div class="finance-section">
+      <h4>👥 入住人登记 <span class="badge ${guests.is_over ? 'badge-danger' : 'badge-info'}" style="margin-left:8px;">${guests.guest_count}/${guests.capacity} 人${guests.is_over ? ' ⚠️超员' : ''}</span></h4>
+      ${guestsHtml}
+      <div class="action-row">
+        ${canEditGuests ? `<button class="btn btn-primary btn-sm" onclick="openGuestsModal(${o.id}, '入住人登记 - 订单#${o.id}')">管理入住人</button>` : '<span class="tip">订单已退房或已取消，无法修改入住人</span>'}
+      </div>
+    </div>`;
 
     if (o.status === 'cancelled') {
       html += `
@@ -1086,6 +1218,7 @@ async function showOrderDetail(id) {
         html += `<button class="btn btn-success btn-sm" onclick="openPaymentModal(${o.id}, 'deposit')">🔒 收押金</button>`;
       }
       html += `<button class="btn btn-success btn-sm" onclick="checkinOrder(${o.id})">办理入住</button>`;
+      html += `<button class="btn btn-default btn-sm" onclick="openGuestsModal(${o.id}, '入住人登记 - 订单#${o.id}')">👥 入住人登记</button>`;
       html += `<button class="btn btn-danger btn-sm" onclick="cancelOrder(${o.id})">取消订单</button>`;
     }
     if (o.status === 'checked_in') {
@@ -1098,6 +1231,7 @@ async function showOrderDetail(id) {
       if ((fin.deposit_net_cents || 0) > 0) {
         html += `<button class="btn btn-warning btn-sm" onclick="openRefundDepositModal(${o.id})">💸 退押金</button>`;
       }
+      html += `<button class="btn btn-default btn-sm" onclick="openGuestsModal(${o.id}, '入住人登记 - 订单#${o.id}')">👥 入住人登记</button>`;
       html += `<button class="btn btn-primary btn-sm" onclick="checkoutOrder(${o.id})">办理退房</button>`;
     }
     if (o.status === 'checked_out') {
@@ -1107,6 +1241,7 @@ async function showOrderDetail(id) {
       if ((fin.room_fee_owed_cents || 0) > 0) {
         html += `<button class="btn btn-success btn-sm" onclick="openPaymentModal(${o.id}, 'room_fee')">💰 收尾款</button>`;
       }
+      html += `<button class="btn btn-default btn-sm" onclick="openGuestsModal(${o.id}, '入住人登记 - 订单#${o.id}')">👥 查看入住人</button>`;
     }
     html += '</div>';
 
@@ -1119,6 +1254,221 @@ async function showOrderDetail(id) {
 
 function closeOrderDetailModal() {
   $('orderDetailModal').classList.remove('active');
+}
+
+function idTypeLabel(t) {
+  return { id_card: '身份证', passport: '护照', hk_mo_taiwan: '港澳台通行证' }[t] || t;
+}
+
+function onIdTypeChange() {
+  const type = $('newGuestIdType').value;
+  const input = $('newGuestIdNumber');
+  const birthGroup = $('newGuestBirthDate').parentNode.parentNode;
+  const genderGroup = $('newGuestGender').parentNode.parentNode;
+  if (type === 'id_card') {
+    birthGroup.style.display = '';
+    genderGroup.style.display = '';
+    input.placeholder = '请输入18位身份证号';
+  } else {
+    birthGroup.style.display = 'none';
+    genderGroup.style.display = 'none';
+    input.placeholder = type === 'passport' ? '请输入护照号' : '请输入港澳台通行证号';
+  }
+}
+
+async function handleIdCardPaste(event) {
+  const type = $('newGuestIdType').value;
+  if (type !== 'id_card') return;
+  setTimeout(async () => {
+    const idNumber = event.clipboardData.getData('text').trim();
+    if (idNumber.length === 18) {
+      try {
+        const data = await api('/api/guests/parse-id-card', {
+          method: 'POST',
+          body: JSON.stringify({ id_number: idNumber })
+        };
+        if (data.birth_date) $('newGuestBirthDate').value = data.birth_date;
+        if (data.gender) $('newGuestGender').value = data.gender;
+        toast('已自动解析出生日期和性别');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+  }, 10);
+}
+
+async function handleIdCardInput() {
+  const type = $('newGuestIdType').value;
+  if (type !== 'id_card') return;
+  const idNumber = $('newGuestIdNumber').value.trim();
+  if (idNumber.length === 18 && /^\d{17}[\dXx]$/.test(idNumber)) {
+    try {
+      const data = await api('/api/guests/parse-id-card', {
+        method: 'POST',
+        body: JSON.stringify({ id_number: idNumber })
+      };
+      if (data.birth_date) $('newGuestBirthDate').value = data.birth_date;
+      if (data.gender) $('newGuestGender').value = data.gender;
+    } catch (e) {}
+  }
+}
+
+async function openGuestsModal(orderId, title = '入住人登记') {
+  $('guestsOrderId').value = orderId;
+  $('guestsModalTitle').textContent = title;
+  $('guestsModal').classList.add('active');
+  await loadGuests(orderId);
+  resetAddGuestForm();
+}
+
+function closeGuestsModal() {
+  $('guestsModal').classList.remove('active');
+  currentGuestsOrder = null;
+}
+
+function resetAddGuestForm() {
+  $('newGuestName').value = '';
+  $('newGuestIdType').value = 'id_card';
+  $('newGuestIdNumber').value = '';
+  $('newGuestBirthDate').value = '';
+  $('newGuestGender').value = '';
+  $('newGuestPhone').value = '';
+  $('newGuestIsPrimary').checked = false;
+  onIdTypeChange();
+}
+
+async function loadGuests(orderId) {
+  try {
+    const data = await api('/api/orders/' + orderId + '/guests');
+    currentGuestsOrder = data;
+    renderGuestsList(data);
+    const addForm = $('addGuestForm');
+    if (data.guest_count >= data.capacity) {
+      addForm.style.opacity = '0.5';
+      addForm.style.pointerEvents = 'none';
+    } else {
+      addForm.style.opacity = '';
+      addForm.style.pointerEvents = '';
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderGuestsList(data) {
+  const container = $('guestsList');
+  const guests = data.guests || [];
+  const canEdit = currentGuestsOrder && currentGuestsOrder.guests && 
+    !['checked_out', 'cancelled'].includes(currentGuestsOrder.status);
+
+  let html = `<div style="margin-bottom: 12px; padding: 8px 12px; border-radius: 4px; background: ${data.is_over ? '#fff3cd' : '#e8f5e9'; color: ${data.is_over ? '#856404' : '#155724'};">
+    <strong>入住人数：${data.guest_count} / ${data.capacity} 人</strong>
+    ${data.is_over ? ` <span style="color:#e53935;">⚠️ 超员 ${data.over_count} 人</span>` : ''}
+  </div>`;
+
+  if (guests.length === 0) {
+    html += '<div class="empty" style="padding: 20px;">未登记入住人</div>';
+  } else {
+    html += '<table><thead><tr><th>姓名</th><th>证件类型</th><th>证件号</th><th>出生日期</th><th>性别</th><th>手机号</th><th>操作</th></tr></thead><tbody>';
+    for (const g of guests) {
+      const idDisplay = g.id_number ? g.id_number : '<span style="color:#999;">未填写</span>';
+      const isPrimary = g.is_primary ? '<span class="badge badge-primary" style="background:#1a73e8;color:#fff;">主客</span>' : '';
+      html += `<tr>
+        <td><strong>${g.name}</strong> ${isPrimary}</td>
+        <td>${idTypeLabel(g.id_type)}</td>
+        <td>
+          ${idDisplay}
+          ${g.id_number ? `<button class="btn btn-default btn-sm" style="margin-left:4px;" onclick="showFullId(${g.id}, '${g.name.replace(/'/g, "\\'")}')">查看完整</button>` : ''}
+        </td>
+        <td>${g.birth_date || '-'}</td>
+        <td>${g.gender || '-'}</td>
+        <td>${g.phone || '-'}</td>
+        <td>
+          ${canEdit ? `<button class="btn btn-danger btn-sm" onclick="deleteGuest(${g.id})">删除</button>` : ''}
+        </td>
+      </tr>`;
+    }
+    if (data.collisions && data.collisions.length > 0) {
+      html += `<tr><td colspan="7" style="background:#fff3cd;color:#856404;padding:12px;">
+        ⚠️ 该证件号在 ${data.collisions[0].room_name} 有重叠入住：${data.collisions[0].guest_name} (${data.collisions[0].check_in} ~ ${data.collisions[0].check_out})
+      </td></tr>`;
+    }
+    html += '</tbody></table>';
+  }
+  container.innerHTML = html;
+}
+
+async function addNewGuest() {
+  const orderId = parseInt($('guestsOrderId').value);
+  const name = $('newGuestName').value.trim();
+  const id_type = $('newGuestIdType').value;
+  const id_number = $('newGuestIdNumber').value.trim();
+  const phone = $('newGuestPhone').value.trim();
+  const is_primary = $('newGuestIsPrimary').checked ? 1 : 0;
+
+  if (!name) {
+    toast('请输入姓名', 'error');
+    return;
+  }
+  if (!id_number) {
+    toast('请输入证件号', 'error');
+    return;
+  }
+
+  try {
+    const result = await api('/api/orders/' + orderId + '/guests', {
+      method: 'POST',
+      body: JSON.stringify({ name, id_type, id_number, phone, is_primary })
+    });
+
+    if (result.collisions && result.collisions.length > 0) {
+      const c = result.collisions[0];
+      const ok = confirm(`⚠️ 该证件号与订单 #${c.id} (${c.guest_name} - ${c.room_name}) 入住时间重叠 (${c.check_in} ~ ${c.check_out})\n\n可能是同一人订了两间房，也可能真撞了。是否继续添加？`);
+      if (!ok) return;
+    }
+
+    toast('添加成功');
+    resetAddGuestForm();
+    await loadGuests(orderId);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteGuest(guestId) {
+  if (!confirm('确定删除该入住人吗？')) return;
+  try {
+    await api('/api/guests/' + guestId, { method: 'DELETE' });
+    toast('删除成功');
+    const orderId = parseInt($('guestsOrderId').value);
+    await loadGuests(orderId);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function showFullId(guestId, guestName) {
+  currentConfirmGuestId = guestId;
+  currentConfirmGuestName = guestName;
+  $('confirmGuestName').textContent = guestName;
+  $('confirmIdModal').classList.add('active');
+}
+
+function closeConfirmIdModal() {
+  $('confirmIdModal').classList.remove('active');
+  currentConfirmGuestId = null;
+  currentConfirmGuestName = '';
+}
+
+async function confirmShowFullId() {
+  if (!currentConfirmGuestId) return;
+  try {
+    const data = await api('/api/guests/' + currentConfirmGuestId + '/full-id?confirmed=true');
+    alert(`${currentConfirmGuestName} 的完整证件号：\n\n${data.id_number}`);
+    closeConfirmIdModal();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 function openPaymentModal(orderId, type) {

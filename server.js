@@ -27,6 +27,16 @@ const {
   refundDeposit,
   getMonthlyFinanceReport,
   exportMonthlyFinanceCSV,
+  addGuest,
+  updateGuest,
+  deleteGuest,
+  getGuests,
+  getGuestFullIdNumber,
+  getOrderGuestSummary,
+  parseIdCard,
+  validateIdNumber,
+  checkGuestCapacity,
+  maskIdNumber,
 } = require('./db');
 
 initDb();
@@ -165,6 +175,9 @@ app.get('/api/orders', (c) => {
       const fin = getOrderFinance(o.id);
       o.finance = fin;
     } catch (e) {}
+    try {
+      o.guests = getOrderGuestSummary(o.id);
+    } catch (e) {}
   }
 
   return c.json(orders);
@@ -182,9 +195,101 @@ app.get('/api/orders/:id', (c) => {
   try {
     order.finance = getOrderFinance(order.id);
     order.payments = getPayments(order.id);
+    order.guests = getOrderGuestSummary(order.id);
   } catch (e) {}
 
   return c.json(order);
+});
+
+app.get('/api/orders/:id/guests', (c) => {
+  const orderId = parseInt(c.req.param('id'));
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return c.json({ error: '订单不存在' }, 404);
+
+  try {
+    const summary = getOrderGuestSummary(orderId);
+    return c.json(summary);
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.post('/api/orders/:id/guests', async (c) => {
+  const orderId = parseInt(c.req.param('id'));
+  const body = await c.req.json();
+  const { name, id_type, id_number, phone, is_primary } = body;
+
+  try {
+    const result = addGuest(orderId, {
+      name,
+      id_type: id_type || 'id_card',
+      id_number,
+      phone: phone || '',
+      is_primary: is_primary || 0
+    });
+    const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(result.id);
+    guest.id_number = maskIdNumber(guest.id_number, guest.id_type);
+    return c.json({ ...result, guest });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.post('/api/guests/parse-id-card', async (c) => {
+  const body = await c.req.json();
+  const { id_number } = body;
+  if (!id_number) return c.json({ error: '身份证号不能为空' }, 400);
+
+  const validation = validateIdNumber(id_number, 'id_card', false);
+  if (!validation.valid) {
+    return c.json({ error: validation.error }, 400);
+  }
+
+  const parsed = parseIdCard(id_number.trim());
+  if (!parsed) {
+    return c.json({ error: '身份证号解析失败' }, 400);
+  }
+
+  return c.json(parsed);
+});
+
+app.put('/api/guests/:id', async (c) => {
+  const guestId = parseInt(c.req.param('id'));
+  const body = await c.req.json();
+  const { name, id_type, id_number, phone, is_primary } = body;
+
+  try {
+    const result = updateGuest(guestId, { name, id_type, id_number, phone, is_primary });
+    const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+    guest.id_number = maskIdNumber(guest.id_number, guest.id_type);
+    return c.json({ ...result, guest });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.delete('/api/guests/:id', (c) => {
+  const guestId = parseInt(c.req.param('id'));
+  try {
+    const result = deleteGuest(guestId);
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.get('/api/guests/:id/full-id', (c) => {
+  const guestId = parseInt(c.req.param('id'));
+  const { confirmed } = c.req.query();
+  if (confirmed !== 'true') {
+    return c.json({ error: '请确认后再查看完整证件号' }, 400);
+  }
+  try {
+    const result = getGuestFullIdNumber(guestId);
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
 });
 
 app.post('/api/orders/check-price', async (c) => {

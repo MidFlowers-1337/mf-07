@@ -86,6 +86,28 @@ function initDb() {
   try { db.exec('ALTER TABLE rooms ADD COLUMN deposit_amount_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
   try { db.exec('ALTER TABLE orders ADD COLUMN deposit_amount_cents INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
 
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS guests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        id_type TEXT NOT NULL DEFAULT 'id_card',
+        id_number TEXT NOT NULL,
+        phone TEXT DEFAULT '',
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        birth_date TEXT,
+        gender TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+      );
+    `);
+  } catch (e) {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_guests_order ON guests(order_id)'); } catch (e) {}
+  try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_order_idnum ON guests(order_id, id_number)'); } catch (e) {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_guests_idnum ON guests(id_number)'); } catch (e) {}
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,6 +316,11 @@ function createOrder(roomId, guestName, guestPhone, checkIn, checkOut, cleanerNa
 
     insertCleaning.run(roomId, orderId, checkOut, cleanerName);
 
+    db.prepare(`
+      INSERT INTO guests (order_id, name, id_type, id_number, phone, is_primary, birth_date, gender)
+      VALUES (?, ?, 'id_card', ?, ?, 1, NULL, NULL)
+    `).run(orderId, guestName, '', guestPhone || '');
+
     return orderId;
   })();
 
@@ -454,6 +481,7 @@ function cancelOrder(orderId) {
   `);
 
   const deleteDates = db.prepare('DELETE FROM room_dates WHERE order_id = ?');
+  const deleteGuests = db.prepare('DELETE FROM guests WHERE order_id = ?');
 
   const cancelCleaning = db.prepare(`
     UPDATE cleanings SET status = 'cancelled' WHERE order_id = ?
@@ -462,6 +490,7 @@ function cancelOrder(orderId) {
   db.transaction(() => {
     updateOrder.run(fee, totalRefund, orderId);
     deleteDates.run(orderId);
+    deleteGuests.run(orderId);
     cancelCleaning.run(orderId);
 
     if (depositRefund > 0) {
@@ -654,6 +683,280 @@ function exportMonthlyFinanceCSV(year, month) {
   return lines.join('\n');
 }
 
+function validateIdCardChecksum(idNumber) {
+  if (!/^\d{17}[\dXx]$/.test(idNumber)) return false;
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+  const checkCodes = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
+  let sum = 0;
+  for (let i = 0; i < 17; i++) {
+    sum += parseInt(idNumber.charAt(i)) * weights[i];
+  }
+  const expectedCode = checkCodes[sum % 11];
+  const actualCode = idNumber.charAt(17).toUpperCase();
+  return actualCode === expectedCode;
+}
+
+function parseIdCard(idNumber) {
+  if (!validateIdCardChecksum(idNumber)) return null;
+  const birthDate = idNumber.substring(6, 10) + '-' + idNumber.substring(10, 12) + '-' + idNumber.substring(12, 14);
+  const genderCode = parseInt(idNumber.charAt(16));
+  const gender = genderCode % 2 === 1 ? '男' : '女';
+  return { birth_date: birthDate, gender };
+}
+
+function maskIdNumber(idNumber, idType) {
+  if (!idNumber) return '';
+  if (idType === 'id_card' && idNumber.length === 18) {
+    return idNumber.substring(0, 6) + '********' + idNumber.substring(14, 18);
+  }
+  if (idNumber.length <= 10) {
+    return idNumber.charAt(0) + '*'.repeat(Math.max(0, idNumber.length - 2)) + (idNumber.length > 1 ? idNumber.charAt(idNumber.length - 1) : '');
+  }
+  return idNumber.substring(0, 4) + '*'.repeat(idNumber.length - 8) + idNumber.substring(idNumber.length - 4);
+}
+
+function validateIdNumber(idNumber, idType, allowEmpty = false) {
+  if (!idNumber || !idNumber.trim()) {
+    if (allowEmpty) return { valid: true };
+    return { valid: false, error: '证件号不能为空' };
+  }
+  const idNum = idNumber.trim();
+
+  if (idType === 'id_card') {
+    if (!/^\d{17}[\dXx]$/.test(idNum)) {
+      return { valid: false, error: '身份证号必须是18位，最后一位可以是X' };
+    }
+    if (!validateIdCardChecksum(idNum)) {
+      return { valid: false, error: '身份证号校验位不正确' };
+    }
+    const birthStr = idNum.substring(6, 10) + '-' + idNum.substring(10, 12) + '-' + idNum.substring(12, 14);
+    const birthDate = new Date(birthStr);
+    if (isNaN(birthDate.getTime()) || birthDate > new Date()) {
+      return { valid: false, error: '身份证号出生日期无效' };
+    }
+  } else if (idType === 'passport') {
+    if (idNum.length < 6 || idNum.length > 15) {
+      return { valid: false, error: '护照号长度不正确（通常6-15位）' };
+    }
+  } else if (idType === 'hk_mo_taiwan') {
+    if (!/^[A-Za-z0-9]{8,11}$/.test(idNum)) {
+      return { valid: false, error: '港澳台通行证号长度不正确（通常8-11位）' };
+    }
+  } else {
+    return { valid: false, error: '无效的证件类型' };
+  }
+
+  return { valid: true };
+}
+
+function checkIdCollision(orderId, idNumber, checkIn, checkOut) {
+  const sql = `
+    SELECT DISTINCT o.id, o.guest_name, o.check_in, o.check_out, r.name as room_name
+    FROM guests g
+    JOIN orders o ON g.order_id = o.id
+    JOIN rooms r ON o.room_id = r.id
+    WHERE g.id_number = ?
+      AND o.id != ?
+      AND o.status NOT IN ('cancelled')
+      AND o.check_in < ?
+      AND o.check_out > ?
+  `;
+  const collisions = db.prepare(sql).all(idNumber, orderId, checkOut, checkIn);
+  return collisions;
+}
+
+function checkGuestCapacity(orderId) {
+  const order = db.prepare('SELECT room_id, status FROM orders WHERE id = ?').get(orderId);
+  if (!order) throw new Error('订单不存在');
+
+  const room = db.prepare('SELECT capacity FROM rooms WHERE id = ?').get(order.room_id);
+  if (!room) throw new Error('房源不存在');
+
+  const guestCount = db.prepare('SELECT COUNT(*) as cnt FROM guests WHERE order_id = ?').get(orderId).cnt;
+  const capacity = room.capacity;
+
+  return {
+    guest_count: guestCount,
+    capacity: capacity,
+    is_over: guestCount > capacity,
+    over_count: Math.max(0, guestCount - capacity)
+  };
+}
+
+function canModifyGuests(order) {
+  if (!order) return false;
+  if (order.status === 'cancelled') return false;
+  if (order.status === 'checked_out') return false;
+  return true;
+}
+
+function addGuest(orderId, guestData, allowEmptyId = false) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) throw new Error('订单不存在');
+  if (!canModifyGuests(order)) throw new Error('当前订单状态不能修改入住人');
+
+  const { name, id_type = 'id_card', id_number, phone = '', is_primary = 0 } = guestData;
+
+  if (!name || !name.trim()) throw new Error('姓名不能为空');
+
+  const idNumTrimmed = id_number ? id_number.trim() : '';
+  if (!idNumTrimmed && !allowEmptyId) {
+    throw new Error('证件号不能为空');
+  }
+
+  const idValidation = validateIdNumber(id_number, id_type, allowEmptyId);
+  if (!idValidation.valid) throw new Error(idValidation.error);
+
+  let existing = null;
+  if (idNumTrimmed) {
+    existing = db.prepare('SELECT id FROM guests WHERE order_id = ? AND id_number = ?').get(orderId, idNumTrimmed);
+  }
+  if (existing) throw new Error('同一订单中证件号不能重复');
+
+  const preCapacity = checkGuestCapacity(orderId);
+  if (preCapacity.guest_count + 1 > preCapacity.capacity) {
+    throw new Error(`入住人数(${preCapacity.guest_count + 1})超过房源最大容量(${preCapacity.capacity})，超员${(preCapacity.guest_count + 1) - preCapacity.capacity}人`);
+  }
+
+  let birthDate = null;
+  let gender = null;
+  if (id_type === 'id_card' && idNumTrimmed) {
+    const parsed = parseIdCard(idNumTrimmed);
+    if (parsed) {
+      birthDate = parsed.birth_date;
+      gender = parsed.gender;
+    }
+  }
+
+  const result = db.transaction(() => {
+    if (is_primary) {
+      db.prepare('UPDATE guests SET is_primary = 0 WHERE order_id = ?').run(orderId);
+    }
+
+    const info = db.prepare(`
+      INSERT INTO guests (order_id, name, id_type, id_number, phone, is_primary, birth_date, gender)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(orderId, name.trim(), id_type, idNumTrimmed, phone.trim(), is_primary ? 1 : 0, birthDate, gender);
+
+    const collisions = idNumTrimmed ? checkIdCollision(orderId, idNumTrimmed, order.check_in, order.check_out) : [];
+    const res = { id: info.lastInsertRowid, collisions };
+
+    const capacityAfter = checkGuestCapacity(orderId);
+    res.capacity = capacityAfter;
+
+    return res;
+  })();
+
+  return result;
+}
+
+function updateGuest(guestId, guestData) {
+  const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+  if (!guest) throw new Error('入住人不存在');
+
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(guest.order_id);
+  if (!order) throw new Error('订单不存在');
+  if (!canModifyGuests(order)) throw new Error('当前订单状态不能修改入住人');
+
+  const { name, id_type, id_number, phone, is_primary } = guestData;
+
+  const finalName = (name !== undefined ? name : guest.name).trim();
+  const finalIdType = id_type !== undefined ? id_type : guest.id_type;
+  const finalIdNumber = (id_number !== undefined ? id_number : guest.id_number).trim();
+  const finalPhone = phone !== undefined ? phone.trim() : guest.phone;
+  const finalIsPrimary = is_primary !== undefined ? (is_primary ? 1 : 0) : guest.is_primary;
+
+  if (!finalName) throw new Error('姓名不能为空');
+  if (!finalIdNumber) throw new Error('证件号不能为空');
+
+  const idValidation = validateIdNumber(finalIdNumber, finalIdType);
+  if (!idValidation.valid) throw new Error(idValidation.error);
+
+  const existing = db.prepare('SELECT id FROM guests WHERE order_id = ? AND id_number = ? AND id != ?')
+    .get(guest.order_id, finalIdNumber, guestId);
+  if (existing) throw new Error('同一订单中证件号不能重复');
+
+  let birthDate = guest.birth_date;
+  let gender = guest.gender;
+  if (finalIdType === 'id_card' && (id_number !== undefined || id_type !== undefined)) {
+    const parsed = parseIdCard(finalIdNumber);
+    if (parsed) {
+      birthDate = parsed.birth_date;
+      gender = parsed.gender;
+    }
+  }
+
+  if (finalIsPrimary) {
+    db.prepare('UPDATE guests SET is_primary = 0 WHERE order_id = ? AND id != ?').run(guest.order_id, guestId);
+  }
+
+  db.prepare(`
+    UPDATE guests SET
+      name = ?, id_type = ?, id_number = ?, phone = ?, is_primary = ?,
+      birth_date = ?, gender = ?, updated_at = datetime('now', 'localtime')
+    WHERE id = ?
+  `).run(finalName, finalIdType, finalIdNumber, finalPhone, finalIsPrimary, birthDate, gender, guestId);
+
+  const capacityCheck = checkGuestCapacity(guest.order_id);
+  if (capacityCheck.is_over) {
+    throw new Error(`入住人数(${capacityCheck.guest_count})超过房源最大容量(${capacityCheck.capacity})，超员${capacityCheck.over_count}人`);
+  }
+
+  const collisions = checkIdCollision(guest.order_id, finalIdNumber, order.check_in, order.check_out);
+  const result = { updated: true, collisions };
+
+  const capacityAfter = checkGuestCapacity(guest.order_id);
+  result.capacity = capacityAfter;
+
+  return result;
+}
+
+function deleteGuest(guestId) {
+  const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+  if (!guest) throw new Error('入住人不存在');
+
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(guest.order_id);
+  if (!order) throw new Error('订单不存在');
+  if (!canModifyGuests(order)) throw new Error('当前订单状态不能修改入住人');
+
+  db.prepare('DELETE FROM guests WHERE id = ?').run(guestId);
+
+  const capacityAfter = checkGuestCapacity(guest.order_id);
+  return { deleted: true, capacity: capacityAfter };
+}
+
+function getGuests(orderId, mask = true) {
+  const guests = db.prepare('SELECT * FROM guests WHERE order_id = ? ORDER BY is_primary DESC, id').all(orderId);
+  if (mask) {
+    return guests.map(g => ({
+      ...g,
+      id_number: maskIdNumber(g.id_number, g.id_type)
+    }));
+  }
+  return guests;
+}
+
+function getGuestFullIdNumber(guestId) {
+  const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+  if (!guest) throw new Error('入住人不存在');
+  return { id_number: guest.id_number };
+}
+
+function getOrderGuestSummary(orderId) {
+  const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+  const guests = getGuests(orderId, true);
+  const capacity = checkGuestCapacity(orderId);
+  return {
+    guests,
+    guest_count: capacity.guest_count,
+    capacity: capacity.capacity,
+    is_over: capacity.is_over,
+    over_count: capacity.over_count,
+    primary_guest: guests.find(g => g.is_primary) || null,
+    status: order ? order.status : null
+  };
+}
+
 module.exports = {
   db,
   initDb,
@@ -685,4 +988,17 @@ module.exports = {
   refundDeposit,
   getMonthlyFinanceReport,
   exportMonthlyFinanceCSV,
+  validateIdCardChecksum,
+  parseIdCard,
+  maskIdNumber,
+  validateIdNumber,
+  checkIdCollision,
+  checkGuestCapacity,
+  canModifyGuests,
+  addGuest,
+  updateGuest,
+  deleteGuest,
+  getGuests,
+  getGuestFullIdNumber,
+  getOrderGuestSummary,
 };
