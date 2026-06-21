@@ -18,12 +18,26 @@ const {
   cancelOrder,
   db,
   initDb,
+  yuanToFen,
+  fenToYuan,
+  addPayment,
+  getPayments,
+  getOrderFinance,
+  collectDeposit,
+  refundDeposit,
+  getMonthlyFinanceReport,
+  exportMonthlyFinanceCSV,
 } = require('./db');
 
 let passed = 0;
 let failed = 0;
 
 initDb();
+
+db.exec("PRAGMA foreign_keys = OFF");
+db.exec("DELETE FROM payments; DELETE FROM room_dates; DELETE FROM cleanings; DELETE FROM orders; DELETE FROM rooms; DELETE FROM holidays;");
+db.exec("DELETE FROM sqlite_sequence WHERE name IN ('payments', 'rooms', 'orders', 'room_dates', 'cleanings', 'holidays')");
+db.exec("PRAGMA foreign_keys = ON");
 
 function test(name, fn) {
   try {
@@ -205,8 +219,8 @@ test('calcCancelFee: 当天取消 - 不退', () => {
 
 console.log('\n=== 数据库集成测试 ===\n');
 
-db.exec('DELETE FROM room_dates; DELETE FROM cleanings; DELETE FROM orders; DELETE FROM rooms; DELETE FROM holidays;');
-db.exec("DELETE FROM sqlite_sequence WHERE name IN ('rooms', 'orders', 'room_dates', 'cleanings', 'holidays')");
+db.exec('DELETE FROM payments; DELETE FROM room_dates; DELETE FROM cleanings; DELETE FROM orders; DELETE FROM rooms; DELETE FROM holidays;');
+db.exec("DELETE FROM sqlite_sequence WHERE name IN ('payments', 'rooms', 'orders', 'room_dates', 'cleanings', 'holidays')");
 
 const roomResult = db.prepare(`
   INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price)
@@ -366,6 +380,278 @@ test('节假日价格在 createOrder 中正确计算', () => {
   assert.strictEqual(order.nights, 4);
   const expected = 200 + 500 + 500 + 500;
   assert.strictEqual(order.total_price, expected);
+});
+
+console.log('\n========================================');
+console.log(`测试完成：通过 ${passed} 个，失败 ${failed} 个`);
+console.log('========================================\n');
+
+if (failed > 0) {
+  process.exit(1);
+}
+
+console.log('\n=== 财务：分元转换测试 ===\n');
+
+test('yuanToFen: 整数元转分', () => {
+  assert.strictEqual(yuanToFen(100), 10000);
+  assert.strictEqual(yuanToFen(0), 0);
+});
+
+test('yuanToFen: 两位小数精确转分', () => {
+  assert.strictEqual(yuanToFen(19.99), 1999);
+  assert.strictEqual(yuanToFen(0.01), 1);
+  assert.strictEqual(yuanToFen(2000.50), 200050);
+});
+
+test('yuanToFen: 浮点陷阱 0.1+0.2 四舍五入', () => {
+  assert.strictEqual(yuanToFen(0.1 + 0.2), 30);
+});
+
+test('fenToYuan: 分转元', () => {
+  assert.strictEqual(fenToYuan(10000), 100);
+  assert.strictEqual(fenToYuan(1999), 19.99);
+  assert.strictEqual(fenToYuan(1), 0.01);
+  assert.strictEqual(fenToYuan(0), 0);
+});
+
+console.log('\n=== 财务：房源押金额度测试 ===\n');
+
+const financeRoomResult = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+  VALUES ('财务测试房-A', 2, 1, 200, 300, 500, 200000)
+`).run();
+const financeRoomId = financeRoomResult.lastInsertRowid;
+
+test('房源押金额度：设置 2000 元 = 200000 分', () => {
+  const r = db.prepare('SELECT deposit_amount_cents FROM rooms WHERE id = ?').get(financeRoomId);
+  assert.strictEqual(Number(r.deposit_amount_cents), 200000);
+});
+
+test('下单时订单自动写入押金', () => {
+  const oid = createOrder(financeRoomId, '财务客人1', '', '2025-06-10', '2025-06-12', '张阿姨');
+  const o = db.prepare('SELECT deposit_amount_cents, total_price FROM orders WHERE id = ?').get(oid);
+  assert.strictEqual(Number(o.deposit_amount_cents), 200000);
+  assert.strictEqual(o.total_price, 400);
+});
+
+console.log('\n=== 财务：收款流水与押金收付测试 ===\n');
+
+db.exec("DELETE FROM payments WHERE 1=1");
+const finOrderId = createOrder(financeRoomId, '财务客人2', '', '2025-06-16', '2025-06-18', '李阿姨');
+
+test('新订单：应收房费 400元（两个工作日） + 押金 2000元，欠款合计 2400元', () => {
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.total_room_fee_cents, 40000);
+  assert.strictEqual(f.deposit_receivable_cents, 200000);
+  assert.strictEqual(f.total_receivable_cents, 240000);
+  assert.strictEqual(f.total_owed_cents, 240000);
+});
+
+test('addPayment: 收 200 元房费定金（微信）', () => {
+  const pid = addPayment(finOrderId, yuanToFen(200), 'room_fee', 'wechat', '定金');
+  assert.ok(pid > 0);
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.room_fee_received_cents, 20000);
+  assert.strictEqual(f.room_fee_owed_cents, 20000);
+});
+
+test('addPayment: 收尾款 200 元（现金）', () => {
+  addPayment(finOrderId, yuanToFen(200), 'room_fee', 'cash', '尾款');
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.room_fee_received_cents, 40000);
+  assert.strictEqual(f.room_fee_owed_cents, 0);
+});
+
+test('collectDeposit: 收押金 2000 元', () => {
+  const pid = collectDeposit(finOrderId, yuanToFen(2000), 'wechat', '入住押金');
+  assert.ok(pid > 0);
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.deposit_received_cents, 200000);
+  assert.strictEqual(f.deposit_net_cents, 200000);
+  assert.strictEqual(f.total_owed_cents, 0);
+});
+
+test('getPayments: 流水记录共 3 条', () => {
+  const list = getPayments(finOrderId);
+  assert.strictEqual(list.length, 3);
+  assert.strictEqual(list[0].type, 'room_fee');
+  assert.strictEqual(list[2].type, 'deposit');
+});
+
+test('应收=已收+欠款：三者必须对得上', () => {
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.total_room_fee_cents, f.room_fee_received_cents + f.room_fee_owed_cents);
+  assert.strictEqual(f.deposit_receivable_cents, f.deposit_received_cents + f.deposit_owed_cents);
+  assert.strictEqual(f.total_receivable_cents, f.total_received_cents + f.total_owed_cents);
+});
+
+console.log('\n=== 财务：退押金（含扣款）测试 ===\n');
+
+test('refundDeposit: 扣 50 元清洁费，退 1950 元', () => {
+  const r = refundDeposit(finOrderId, yuanToFen(1950), yuanToFen(50), '打扫卫生清洁费', 'wechat');
+  assert.strictEqual(r.refund_cents, 195000);
+  assert.strictEqual(r.deducted_cents, 5000);
+  const f = getOrderFinance(finOrderId);
+  assert.strictEqual(f.deposit_refunded_cents, 200000);
+  assert.strictEqual(f.deposit_net_cents, 0);
+});
+
+test('退押金后流水共 5 条（2 条房费 + 1 条收押金 + 1 条扣款 + 1 条退款）', () => {
+  const list = getPayments(finOrderId);
+  assert.strictEqual(list.length, 5);
+  const refundRows = list.filter(p => p.type === 'deposit_refund');
+  assert.strictEqual(refundRows.length, 2);
+  const totalOut = refundRows.reduce((s, p) => s + Number(p.amount_cents), 0);
+  assert.strictEqual(totalOut, 200000);
+});
+
+test('refundDeposit: 余额不足时不能超额退款', () => {
+  let threw = false;
+  try {
+    refundDeposit(finOrderId, 100, 0, '', 'wechat');
+  } catch (e) {
+    threw = true;
+    assert.ok(e.message.includes('超过'));
+  }
+  assert.strictEqual(threw, true);
+});
+
+console.log('\n=== 财务：老订单兼容（无押金）测试 ===\n');
+
+const noDepositRoomId = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+  VALUES ('无押金房', 2, 1, 150, 200, 300, 0)
+`).run().lastInsertRowid;
+
+test('房源无押金时，订单押金为 0，不影响查询', () => {
+  const oid = createOrder(noDepositRoomId, '老客', '', '2025-06-20', '2025-06-21', '王阿姨');
+  const f = getOrderFinance(oid);
+  assert.strictEqual(f.deposit_receivable_cents, 0);
+  assert.strictEqual(f.total_room_fee_cents, 15000);
+  assert.strictEqual(f.total_receivable_cents, 15000);
+});
+
+console.log('\n=== 财务：退订押金一起退测试 ===\n');
+
+const cancelOrderId = createOrder(financeRoomId, '要取消的客人', '', '2025-08-01', '2025-08-03', '张阿姨');
+collectDeposit(cancelOrderId, yuanToFen(2000), 'wechat', '押金');
+addPayment(cancelOrderId, yuanToFen(400), 'room_fee', 'wechat', '全款');
+
+test('cancelOrder: 退订时押金自动退还', () => {
+  const r = cancelOrder(cancelOrderId);
+  assert.ok(r.deposit_refund >= 2000);
+  const f = getOrderFinance(cancelOrderId);
+  assert.strictEqual(f.deposit_net_cents, 0);
+});
+
+test('cancelOrder 后 deposit_refund 流水存在', () => {
+  const list = getPayments(cancelOrderId);
+  const refundRows = list.filter(p => p.type === 'deposit_refund' && p.note && p.note.includes('退订'));
+  assert.strictEqual(refundRows.length, 1);
+  assert.strictEqual(Number(refundRows[0].amount_cents), 200000);
+});
+
+console.log('\n=== 财务：月度对账报表测试 ===\n');
+
+db.exec("DELETE FROM payments WHERE 1=1");
+db.exec("DELETE FROM room_dates; DELETE FROM cleanings; DELETE FROM orders;");
+
+const repRoom1 = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+  VALUES ('对账房A', 2, 1, 100, 150, 200, 100000)
+`).run().lastInsertRowid;
+const repRoom2 = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+  VALUES ('对账房B', 2, 1, 200, 300, 400, 200000)
+`).run().lastInsertRowid;
+
+const repNow = new Date();
+const repY = repNow.getFullYear();
+const repM = repNow.getMonth() + 1;
+const repPrefix = `${repY}-${String(repM).padStart(2, '0')}`;
+
+const repO1 = createOrder(repRoom1, '月测客1', '', `${repPrefix}-10`, `${repPrefix}-12`, '张阿姨');
+const repO1Total = Number(db.prepare('SELECT total_price FROM orders WHERE id=?').get(repO1).total_price);
+const repO1RoomFeeCents = yuanToFen(repO1Total);
+addPayment(repO1, yuanToFen(200), 'room_fee', 'wechat', '房费');
+collectDeposit(repO1, yuanToFen(1000), 'wechat', '押金');
+
+const repO2 = createOrder(repRoom2, '月测客2', '', `${repPrefix}-15`, `${repPrefix}-17`, '李阿姨');
+addPayment(repO2, yuanToFen(200), 'room_fee', 'wechat', '定金');
+collectDeposit(repO2, yuanToFen(2000), 'cash', '押金');
+refundDeposit(repO2, yuanToFen(1900), yuanToFen(100), '扣清洁费', 'cash');
+
+test('getMonthlyFinanceReport: 对账房A 数据正确', () => {
+  const r = getMonthlyFinanceReport(repY, repM);
+  const ra = r.rooms.find(x => x.room_id === repRoom1);
+  assert.ok(ra);
+  assert.strictEqual(ra.room_fee_receivable_cents, repO1RoomFeeCents);
+  assert.strictEqual(ra.room_fee_received_cents, yuanToFen(200));
+  assert.strictEqual(ra.room_fee_owed_cents, Math.max(0, repO1RoomFeeCents - yuanToFen(200)));
+  assert.strictEqual(ra.deposit_receivable_cents, 100000);
+  assert.strictEqual(ra.deposit_in_cents, 100000);
+  assert.strictEqual(ra.deposit_out_cents, 0);
+  assert.strictEqual(ra.deposit_net_cents, 100000);
+});
+
+test('getMonthlyFinanceReport: 对账房B 押金扣款后净额正确', () => {
+  const r = getMonthlyFinanceReport(repY, repM);
+  const rb = r.rooms.find(x => x.room_id === repRoom2);
+  assert.ok(rb);
+  assert.strictEqual(rb.deposit_in_cents, 200000);
+  assert.strictEqual(rb.deposit_out_cents, 200000);
+  assert.strictEqual(rb.deposit_net_cents, 0);
+});
+
+test('getMonthlyFinanceReport: 合计行汇总正确', () => {
+  const r = getMonthlyFinanceReport(repY, repM);
+  const t = r.total;
+  const rooms = r.rooms;
+  assert.strictEqual(t.room_fee_receivable_yuan,
+    rooms.reduce((s, x) => s + x.room_fee_receivable_yuan, 0));
+  assert.strictEqual(t.deposit_in_yuan,
+    rooms.reduce((s, x) => s + x.deposit_in_yuan, 0));
+});
+
+test('exportMonthlyFinanceCSV: 生成 CSV 非空，含合计行', () => {
+  const csv = exportMonthlyFinanceCSV(repY, repM);
+  assert.ok(csv.length > 100);
+  assert.ok(csv.includes('合计'));
+  assert.ok(csv.includes('对账房A'));
+  assert.ok(csv.includes('对账房B'));
+});
+
+test('exportMonthlyFinanceCSV: 字段用逗号分隔，含表头', () => {
+  const csv = exportMonthlyFinanceCSV(repY, repM);
+  assert.ok(csv.includes('房源'));
+  assert.ok(csv.includes('房费应收(元)'));
+  assert.ok(csv.includes('合计应收(元)'));
+});
+
+console.log('\n=== 财务：非法金额与参数校验 ===\n');
+
+test('addPayment: 金额 <= 0 报错', () => {
+  let threw = false;
+  try { addPayment(repO1, 0, 'room_fee', 'wechat'); } catch (e) { threw = true; }
+  assert.strictEqual(threw, true);
+});
+
+test('addPayment: 类型非法报错', () => {
+  let threw = false;
+  try { addPayment(repO1, 100, 'bad_type', 'wechat'); } catch (e) { threw = true; }
+  assert.strictEqual(threw, true);
+});
+
+test('addPayment: 方式非法报错', () => {
+  let threw = false;
+  try { addPayment(repO1, 100, 'room_fee', 'alipay'); } catch (e) { threw = true; }
+  assert.strictEqual(threw, true);
+});
+
+test('refundDeposit: 扣款或退款为负报错', () => {
+  let threw = false;
+  try { refundDeposit(repO1, 100, -50, '', 'wechat'); } catch (e) { threw = true; }
+  assert.strictEqual(threw, true);
 });
 
 console.log('\n========================================');

@@ -18,6 +18,15 @@ const {
   removeHoliday,
   removeHolidayByName,
   isHoliday,
+  yuanToFen,
+  fenToYuan,
+  addPayment,
+  getPayments,
+  getOrderFinance,
+  collectDeposit,
+  refundDeposit,
+  getMonthlyFinanceReport,
+  exportMonthlyFinanceCSV,
 } = require('./db');
 
 initDb();
@@ -37,12 +46,14 @@ app.get('/api/rooms/:id', (c) => {
 
 app.post('/api/rooms', async (c) => {
   const body = await c.req.json();
-  const { name, capacity, bedrooms, facilities, check_in_time, check_out_time, weekday_price, weekend_price, holiday_price } = body;
+  const { name, capacity, bedrooms, facilities, check_in_time, check_out_time, weekday_price, weekend_price, holiday_price, deposit_amount } = body;
   if (!name) return c.json({ error: '房源名称必填' }, 400);
 
+  const depositCents = yuanToFen(deposit_amount || 0);
+
   const info = db.prepare(`
-    INSERT INTO rooms (name, capacity, bedrooms, facilities, check_in_time, check_out_time, weekday_price, weekend_price, holiday_price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO rooms (name, capacity, bedrooms, facilities, check_in_time, check_out_time, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     capacity || 2,
@@ -52,7 +63,8 @@ app.post('/api/rooms', async (c) => {
     check_out_time || '12:00',
     weekday_price || 200,
     weekend_price || 300,
-    holiday_price || 400
+    holiday_price || 400,
+    depositCents
   );
   const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(info.lastInsertRowid);
   return c.json(room);
@@ -64,11 +76,14 @@ app.put('/api/rooms/:id', async (c) => {
   const existing = db.prepare('SELECT * FROM rooms WHERE id = ?').get(id);
   if (!existing) return c.json({ error: '房源不存在' }, 404);
 
+  const depositCents = body.deposit_amount !== undefined ? yuanToFen(body.deposit_amount) : (Number(existing.deposit_amount_cents) || 0);
+
   db.prepare(`
     UPDATE rooms SET
       name = ?, capacity = ?, bedrooms = ?, facilities = ?,
       check_in_time = ?, check_out_time = ?,
-      weekday_price = ?, weekend_price = ?, holiday_price = ?
+      weekday_price = ?, weekend_price = ?, holiday_price = ?,
+      deposit_amount_cents = ?
     WHERE id = ?
   `).run(
     body.name ?? existing.name,
@@ -80,6 +95,7 @@ app.put('/api/rooms/:id', async (c) => {
     body.weekday_price ?? existing.weekday_price,
     body.weekend_price ?? existing.weekend_price,
     body.holiday_price ?? existing.holiday_price,
+    depositCents,
     id
   );
   const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(id);
@@ -143,6 +159,14 @@ app.get('/api/orders', (c) => {
   if (status) { sql += ' AND o.status = ?'; params.push(status); }
   sql += ' ORDER BY o.check_in DESC';
   const orders = db.prepare(sql).all(...params);
+
+  for (const o of orders) {
+    try {
+      const fin = getOrderFinance(o.id);
+      o.finance = fin;
+    } catch (e) {}
+  }
+
   return c.json(orders);
 });
 
@@ -154,6 +178,12 @@ app.get('/api/orders/:id', (c) => {
     WHERE o.id = ?
   `).get(c.req.param('id'));
   if (!order) return c.json({ error: '订单不存在' }, 404);
+
+  try {
+    order.finance = getOrderFinance(order.id);
+    order.payments = getPayments(order.id);
+  } catch (e) {}
+
   return c.json(order);
 });
 
@@ -170,8 +200,9 @@ app.post('/api/orders/check-price', async (c) => {
   const { total, nights } = calculatePrice(room, check_in, check_out);
   const collisions = checkCollision(room_id, check_in, check_out);
   const available = collisions.length === 0;
+  const depositYuan = fenToYuan(Number(room.deposit_amount_cents) || 0);
 
-  return c.json({ total, nights, available, collisions });
+  return c.json({ total, nights, available, collisions, deposit: depositYuan });
 });
 
 app.post('/api/orders', async (c) => {
@@ -200,6 +231,7 @@ app.post('/api/orders', async (c) => {
       WHERE o.id = ?
     `).get(orderId);
 
+    order.finance = getOrderFinance(orderId);
     return c.json(order);
   } catch (e) {
     const msg = e.message;
@@ -217,14 +249,14 @@ app.post('/api/orders', async (c) => {
 app.post('/api/orders/:id/cancel', async (c) => {
   const id = parseInt(c.req.param('id'));
   try {
-    const { fee, refund, rule } = cancelOrder(id);
+    const result = cancelOrder(id);
     const updated = db.prepare(`
       SELECT o.*, r.name as room_name
       FROM orders o
       LEFT JOIN rooms r ON o.room_id = r.id
       WHERE o.id = ?
     `).get(id);
-    return c.json({ ...updated, cancel_rule: rule, cancel_fee: fee, refund_amount: refund });
+    return c.json({ ...updated, cancel_rule: result.rule, cancel_fee: result.fee, refund_amount: result.refund, room_fee_refund: result.room_fee_refund, deposit_refund: result.deposit_refund });
   } catch (e) {
     return c.json({ error: e.message }, 400);
   }
@@ -250,6 +282,98 @@ app.post('/api/orders/:id/checkout', (c) => {
   db.prepare(`UPDATE orders SET status = 'checked_out', updated_at = datetime('now', 'localtime') WHERE id = ?`).run(id);
   const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
   return c.json(updated);
+});
+
+app.get('/api/orders/:id/payments', (c) => {
+  const id = parseInt(c.req.param('id'));
+  try {
+    const payments = getPayments(id);
+    const finance = getOrderFinance(id);
+    return c.json({ payments, finance });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.post('/api/orders/:id/payments', async (c) => {
+  const id = parseInt(c.req.param('id'));
+  const body = await c.req.json();
+  const { amount_yuan, amount_fen, type, method, note } = body;
+
+  let cents;
+  if (amount_fen !== undefined) {
+    cents = Math.round(Number(amount_fen));
+  } else if (amount_yuan !== undefined) {
+    cents = yuanToFen(amount_yuan);
+  } else {
+    return c.json({ error: '金额必填' }, 400);
+  }
+
+  try {
+    const pid = addPayment(id, cents, type, method, note || '');
+    const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(pid);
+    const finance = getOrderFinance(id);
+    return c.json({ payment, finance });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.post('/api/orders/:id/collect-deposit', async (c) => {
+  const id = parseInt(c.req.param('id'));
+  const body = await c.req.json();
+  const { amount_yuan, amount_fen, method, note } = body;
+
+  let cents;
+  if (amount_fen !== undefined) {
+    cents = Math.round(Number(amount_fen));
+  } else if (amount_yuan !== undefined) {
+    cents = yuanToFen(amount_yuan);
+  } else {
+    return c.json({ error: '金额必填' }, 400);
+  }
+
+  try {
+    const pid = collectDeposit(id, cents, method || 'wechat', note || '');
+    const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(pid);
+    const finance = getOrderFinance(id);
+    return c.json({ payment, finance });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.post('/api/orders/:id/refund-deposit', async (c) => {
+  const id = parseInt(c.req.param('id'));
+  const body = await c.req.json();
+  const { refund_yuan, refund_fen, deducted_yuan, deducted_fen, deduction_note, method } = body;
+
+  let refundCents;
+  if (refund_fen !== undefined) {
+    refundCents = Math.round(Number(refund_fen));
+  } else if (refund_yuan !== undefined) {
+    refundCents = yuanToFen(refund_yuan);
+  } else {
+    refundCents = 0;
+  }
+
+  let deductedCents;
+  if (deducted_fen !== undefined) {
+    deductedCents = Math.round(Number(deducted_fen));
+  } else if (deducted_yuan !== undefined) {
+    deductedCents = yuanToFen(deducted_yuan);
+  } else {
+    deductedCents = 0;
+  }
+
+  try {
+    const result = refundDeposit(id, refundCents, deductedCents, deduction_note || '', method || 'wechat');
+    const finance = getOrderFinance(id);
+    const payments = getPayments(id);
+    return c.json({ ...result, finance, payments });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
 });
 
 app.get('/api/cleanings', (c) => {
@@ -378,6 +502,38 @@ app.get('/api/stats/monthly', (c) => {
   };
 
   return c.json({ year: y, month: m, days_in_month: daysInMonth, rooms: result, total });
+});
+
+app.get('/api/stats/finance/monthly', (c) => {
+  const { year, month } = c.req.query();
+  const now = new Date();
+  const y = year ? parseInt(year) : now.getFullYear();
+  const m = month ? parseInt(month) : now.getMonth() + 1;
+
+  try {
+    const report = getMonthlyFinanceReport(y, m);
+    return c.json(report);
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
+app.get('/api/stats/finance/monthly/export', (c) => {
+  const { year, month } = c.req.query();
+  const now = new Date();
+  const y = year ? parseInt(year) : now.getFullYear();
+  const m = month ? parseInt(month) : now.getMonth() + 1;
+
+  try {
+    const csv = exportMonthlyFinanceCSV(y, m);
+    const filename = `finance_${y}_${String(m).padStart(2, '0')}.csv`;
+    return c.body(csv, 200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
 });
 
 app.use('/*', serveStatic({ root: path.join(__dirname, 'public') }));
