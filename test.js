@@ -628,6 +628,66 @@ test('exportMonthlyFinanceCSV: 字段用逗号分隔，含表头', () => {
   assert.ok(csv.includes('合计应收(元)'));
 });
 
+console.log('\n=== 财务：提前收款跨月归属测试（Bug修复验证）===\n');
+
+const earlyRoomId = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price, deposit_amount_cents)
+  VALUES ('海景房-提前收', 2, 1, 200, 260, 350, 200000)
+`).run().lastInsertRowid;
+
+const curY = new Date().getFullYear();
+const curM = new Date().getMonth() + 1;
+const nextM = curM === 12 ? 1 : curM + 1;
+const nextY = curM === 12 ? curY + 1 : curY;
+const nextPrefix = `${nextY}-${String(nextM).padStart(2, '0')}`;
+
+const earlyOid = createOrder(earlyRoomId, '提前收款客', '', `${nextPrefix}-05`, `${nextPrefix}-07`, '张阿姨');
+const earlyOrder = db.prepare('SELECT total_price FROM orders WHERE id=?').get(earlyOid);
+const earlyRoomFeeCents = yuanToFen(Number(earlyOrder.total_price));
+const earlyDepositCents = 200000;
+addPayment(earlyOid, earlyRoomFeeCents, 'room_fee', 'wechat', '房费全款');
+collectDeposit(earlyOid, earlyDepositCents, 'wechat', '押金');
+
+test('提前收款：当前月份报表应收为0（因为入住月是下个月）', () => {
+  const r = getMonthlyFinanceReport(curY, curM);
+  const er = r.rooms.find(x => x.room_id === earlyRoomId);
+  assert.ok(er);
+  assert.strictEqual(er.room_fee_receivable_cents, 0);
+  assert.strictEqual(er.room_fee_received_cents, 0);
+  assert.strictEqual(er.deposit_receivable_cents, 0);
+  assert.strictEqual(er.deposit_in_cents, 0);
+  assert.strictEqual(er.total_receivable_cents, 0);
+  assert.strictEqual(er.total_owed_cents, 0);
+});
+
+test('提前收款：入住月份报表应收=已收，欠款=0', () => {
+  const r = getMonthlyFinanceReport(nextY, nextM);
+  const er = r.rooms.find(x => x.room_id === earlyRoomId);
+  assert.ok(er);
+  assert.strictEqual(er.room_fee_receivable_cents, earlyRoomFeeCents);
+  assert.strictEqual(er.room_fee_received_cents, earlyRoomFeeCents);
+  assert.strictEqual(er.room_fee_owed_cents, 0);
+  assert.strictEqual(er.deposit_receivable_cents, earlyDepositCents);
+  assert.strictEqual(er.deposit_in_cents, earlyDepositCents);
+  assert.strictEqual(er.total_receivable_cents, earlyRoomFeeCents + earlyDepositCents);
+  assert.strictEqual(er.total_received_cents, earlyRoomFeeCents + earlyDepositCents);
+  assert.strictEqual(er.total_owed_cents, 0);
+});
+
+test('提前收款：应收=已收+欠款 恒等式校验（每个房源每个月）', () => {
+  for (const [yy, mm] of [[curY, curM], [nextY, nextM]]) {
+    const r = getMonthlyFinanceReport(yy, mm);
+    for (const rm of r.rooms) {
+      assert.strictEqual(rm.room_fee_receivable_cents - rm.room_fee_received_cents - rm.room_fee_owed_cents >= 0, true);
+      assert.strictEqual(rm.room_fee_owed_cents, Math.max(0, rm.room_fee_receivable_cents - rm.room_fee_received_cents));
+      assert.strictEqual(rm.deposit_owed_cents, Math.max(0, rm.deposit_receivable_cents - rm.deposit_in_cents));
+      assert.strictEqual(rm.total_receivable_cents, rm.room_fee_receivable_cents + rm.deposit_receivable_cents);
+      assert.strictEqual(rm.total_received_cents, rm.room_fee_received_cents + rm.deposit_in_cents);
+      assert.strictEqual(rm.total_owed_cents, rm.room_fee_owed_cents + rm.deposit_owed_cents);
+    }
+  }
+});
+
 console.log('\n=== 财务：非法金额与参数校验 ===\n');
 
 test('addPayment: 金额 <= 0 报错', () => {

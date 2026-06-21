@@ -488,27 +488,6 @@ function getMonthlyFinanceReport(year, month) {
   const nextMonth = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
 
   const rooms = db.prepare('SELECT id, name FROM rooms ORDER BY id').all();
-
-  const rows = db.prepare(`
-    SELECT
-      o.room_id,
-      o.id as order_id,
-      o.total_price,
-      COALESCE(o.deposit_amount_cents, 0) as deposit_amount_cents,
-      p.id as pay_id,
-      p.amount_cents,
-      p.type,
-      p.created_at
-    FROM orders o
-    LEFT JOIN payments p ON p.order_id = o.id
-    WHERE o.room_id IS NOT NULL
-      AND o.status NOT IN ('cancelled')
-      AND (
-        (o.check_in < ? AND o.check_out > ?)
-        OR (p.created_at >= ? AND p.created_at < ?)
-      )
-  `).all(nextMonth, monthStart, monthStart, nextMonth);
-
   const byRoom = {};
   for (const r of rooms) {
     byRoom[r.id] = {
@@ -521,60 +500,17 @@ function getMonthlyFinanceReport(year, month) {
       deposit_in_cents: 0,
       deposit_out_cents: 0,
       deposit_net_cents: 0,
+      deposit_owed_cents: 0,
       total_receivable_cents: 0,
       total_received_cents: 0,
       total_owed_cents: 0,
     };
   }
 
-  const orderFinance = {};
-  for (const row of rows) {
-    if (!orderFinance[row.order_id]) {
-      orderFinance[row.order_id] = {
-        room_id: row.room_id,
-        total_price: Number(row.total_price),
-        deposit_amount_cents: Number(row.deposit_amount_cents) || 0,
-        payments: [],
-      };
-    }
-    if (row.pay_id) {
-      orderFinance[row.order_id].payments.push({
-        amount_cents: Number(row.amount_cents),
-        type: row.type,
-        created_at: row.created_at,
-      });
-    }
-  }
-
-  for (const oid in orderFinance) {
-    const of = orderFinance[oid];
-    const room = byRoom[of.room_id];
-    if (!room) continue;
-
-    const roomFeeCents = yuanToFen(of.total_price);
-    const depositCents = of.deposit_amount_cents;
-
-    let paidRoom = 0, paidDep = 0, refundDep = 0;
-    for (const p of of.payments) {
-      const inMonth = p.created_at >= monthStart && p.created_at < nextMonth;
-      if (!inMonth) continue;
-      if (p.type === 'room_fee') paidRoom += p.amount_cents;
-      else if (p.type === 'deposit') paidDep += p.amount_cents;
-      else if (p.type === 'deposit_refund') refundDep += p.amount_cents;
-    }
-
-    const overlapStart = of.check_in_for_calc || null;
-    room.room_fee_receivable_cents += roomFeeCents;
-    room.deposit_receivable_cents += depositCents;
-    room.room_fee_received_cents += paidRoom;
-    room.deposit_in_cents += paidDep;
-    room.deposit_out_cents += refundDep;
-  }
-
   const allOrders = db.prepare(`
-    SELECT id, room_id, total_price, COALESCE(deposit_amount_cents, 0) as deposit_amount_cents, check_in, check_out
+    SELECT id, room_id, total_price, COALESCE(deposit_amount_cents, 0) as deposit_amount_cents,
+           check_in, check_out, status
     FROM orders
-    WHERE status NOT IN ('cancelled')
   `).all();
 
   const paidMap = {};
@@ -588,51 +524,45 @@ function getMonthlyFinanceReport(year, month) {
     paidMap[pr.order_id][pr.type] = Number(pr.total) || 0;
   }
 
-  for (const room of rooms) {
-    const r = byRoom[room.id];
-    r.room_fee_receivable_cents = 0;
-    r.deposit_receivable_cents = 0;
-    r.room_fee_received_cents = 0;
-    r.deposit_in_cents = 0;
-    r.deposit_out_cents = 0;
-  }
-
   for (const o of allOrders) {
+    if (o.status === 'cancelled') continue;
     const r = byRoom[o.room_id];
     if (!r) continue;
-    if (o.check_in >= nextMonth || o.check_out <= monthStart) continue;
 
-    const roomFeeCents = yuanToFen(Number(o.total_price));
+    const hasStayNights = !(o.check_in >= nextMonth || o.check_out <= monthStart);
+    const isDepositMonth = o.check_in >= monthStart && o.check_in < nextMonth;
+    if (!hasStayNights && !isDepositMonth) continue;
+
+    const totalRoomFeeCents = yuanToFen(Number(o.total_price));
     const depositCents = Number(o.deposit_amount_cents) || 0;
-
-    const totalNights = diffDays(o.check_in, o.check_out);
-    const overlapStart = o.check_in > monthStart ? o.check_in : monthStart;
-    const overlapEnd = o.check_out < nextMonth ? o.check_out : nextMonth;
-    const overlapNights = diffDays(overlapStart, overlapEnd);
-    const ratio = totalNights > 0 ? overlapNights / totalNights : 0;
-
-    r.room_fee_receivable_cents += Math.round(roomFeeCents * ratio);
-
     const paid = paidMap[o.id] || { room_fee: 0, deposit: 0, deposit_refund: 0 };
-    const allPayments = db.prepare(`
-      SELECT amount_cents, type, created_at FROM payments WHERE order_id = ?
-    `).all(o.id);
 
-    for (const p of allPayments) {
-      if (p.created_at < monthStart || p.created_at >= nextMonth) continue;
-      const cents = Number(p.amount_cents);
-      if (p.type === 'room_fee') r.room_fee_received_cents += cents;
-      else if (p.type === 'deposit') r.deposit_in_cents += cents;
-      else if (p.type === 'deposit_refund') r.deposit_out_cents += cents;
+    if (hasStayNights && totalRoomFeeCents > 0) {
+      const totalNights = diffDays(o.check_in, o.check_out);
+      const overlapStart = o.check_in > monthStart ? o.check_in : monthStart;
+      const overlapEnd = o.check_out < nextMonth ? o.check_out : nextMonth;
+      const overlapNights = diffDays(overlapStart, overlapEnd);
+      const ratio = totalNights > 0 ? overlapNights / totalNights : 0;
+
+      const monthlyReceivable = Math.round(totalRoomFeeCents * ratio);
+      const monthlyReceived = Math.round(paid.room_fee * ratio);
+      const monthlyOwed = Math.max(0, monthlyReceivable - monthlyReceived);
+
+      r.room_fee_receivable_cents += monthlyReceivable;
+      r.room_fee_received_cents += monthlyReceived;
+      r.room_fee_owed_cents += monthlyOwed;
     }
 
-    r.deposit_receivable_cents += depositCents;
+    if (isDepositMonth) {
+      r.deposit_receivable_cents += depositCents;
+      r.deposit_in_cents += paid.deposit;
+      r.deposit_out_cents += paid.deposit_refund;
+    }
   }
 
   for (const room of rooms) {
     const r = byRoom[room.id];
     r.deposit_net_cents = r.deposit_in_cents - r.deposit_out_cents;
-    r.room_fee_owed_cents = Math.max(0, r.room_fee_receivable_cents - r.room_fee_received_cents);
     r.deposit_owed_cents = Math.max(0, r.deposit_receivable_cents - r.deposit_in_cents);
     r.total_receivable_cents = r.room_fee_receivable_cents + r.deposit_receivable_cents;
     r.total_received_cents = r.room_fee_received_cents + r.deposit_in_cents;
