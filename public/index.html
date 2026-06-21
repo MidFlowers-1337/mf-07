@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>民宿管理系统</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #333; }
+
+.header { background: #fff; padding: 16px 24px; border-bottom: 1px solid #e8e8e8; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.header h1 { font-size: 20px; color: #1a73e8; }
+
+.tabs { display: flex; gap: 4px; padding: 12px 24px 0; background: #fff; border-bottom: 1px solid #e8e8e8; }
+.tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 14px; color: #666; }
+.tab:hover { color: #1a73e8; }
+.tab.active { color: #1a73e8; border-bottom-color: #1a73e8; font-weight: 500; }
+
+.content { padding: 20px 24px; }
+.page { display: none; }
+.page.active { display: block; }
+
+.card { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.card h3 { font-size: 16px; margin-bottom: 16px; color: #333; }
+
+.btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+.btn-primary { background: #1a73e8; color: #fff; }
+.btn-primary:hover { background: #1557b0; }
+.btn-danger { background: #e53935; color: #fff; }
+.btn-danger:hover { background: #c62828; }
+.btn-success { background: #43a047; color: #fff; }
+.btn-success:hover { background: #2e7d32; }
+.btn-default { background: #f0f0f0; color: #333; }
+.btn-default:hover { background: #e0e0e0; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-size: 14px; color: #555; font-weight: 500; }
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  outline: none; border-color: #1a73e8;
+}
+.form-row { display: flex; gap: 16px; }
+.form-row .form-group { flex: 1; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+th { background: #f8f9fa; font-weight: 600; color: #555; }
+tr:hover { background: #f8f9fa; }
+
+.status { padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+.status-pending { background: #fff3cd; color: #856404; }
+.status-confirmed { background: #d4edda; color: #155724; }
+.status-checked_in { background: #cce5ff; color: #004085; }
+.status-checked_out { background: #e2e3e5; color: #383d41; }
+.status-cancelled { background: #f8d7da; color: #721c24; }
+.status-scheduled { background: #d1ecf1; color: #0c5460; }
+.status-completed { background: #d4edda; color: #155724; }
+
+.calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.calendar-header h2 { font-size: 18px; }
+.calendar-nav { display: flex; gap: 8px; }
+
+.calendar-grid { display: grid; grid-template-columns: 120px repeat(7, 1fr); gap: 1px; background: #e8e8e8; border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
+.cal-cell { background: #fff; min-height: 80px; padding: 4px; font-size: 12px; position: relative; }
+.cal-cell.header { background: #f8f9fa; min-height: 40px; font-weight: 600; text-align: center; display: flex; align-items: center; justify-content: center; color: #555; }
+.cal-cell.weekend { background: #fafafa; }
+.cal-cell.other-month { background: #f5f5f5; color: #bbb; }
+.cal-cell .date { font-weight: 600; margin-bottom: 4px; }
+.cal-cell .order-bar { background: #1a73e8; color: #fff; padding: 2px 4px; margin-bottom: 2px; border-radius: 2px; font-size: 11px; cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cal-cell .order-bar.start { border-top-left-radius: 4px; border-bottom-left-radius: 4px; margin-left: 0; }
+.cal-cell .order-bar.end { border-top-right-radius: 4px; border-bottom-right-radius: 4px; margin-right: 0; }
+.cal-cell .cleaning { background: #ff9800; color: #fff; padding: 1px 4px; margin-top: 2px; border-radius: 2px; font-size: 10px; }
+
+.room-col { background: #f8f9fa; font-weight: 500; display: flex; align-items: center; padding: 8px; font-size: 13px; }
+
+.modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+.modal.active { display: flex; }
+.modal-content { background: #fff; border-radius: 8px; padding: 24px; max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto; }
+.modal-content h3 { margin-bottom: 20px; }
+.modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+.stat-card { background: #fff; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.stat-card .value { font-size: 28px; font-weight: bold; color: #1a73e8; }
+.stat-card .label { font-size: 14px; color: #666; margin-top: 4px; }
+
+.empty { text-align: center; padding: 40px; color: #999; }
+
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 4px; color: #fff; z-index: 2000; animation: slideIn 0.3s; }
+.toast.success { background: #43a047; }
+.toast.error { background: #e53935; }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+.tip { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🏠 民宿管理系统</h1>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="calendar">📅 日历房态</div>
+  <div class="tab" data-tab="orders">📋 订单管理</div>
+  <div class="tab" data-tab="rooms">🏠 房源管理</div>
+  <div class="tab" data-tab="cleanings">🧹 清洁排期</div>
+  <div class="tab" data-tab="stats">📊 统计报表</div>
+</div>
+
+<div class="content">
+
+  <div class="page active" id="page-calendar">
+    <div class="card">
+      <div class="calendar-header">
+        <div>
+          <select id="calendarRoom" onchange="renderCalendar()">
+            <option value="">全部房源</option>
+          </select>
+        </div>
+        <h2 id="calendarTitle"></h2>
+        <div class="calendar-nav">
+          <button class="btn btn-default btn-sm" onclick="prevMonth()">← 上月</button>
+          <button class="btn btn-default btn-sm" onclick="today()">今天</button>
+          <button class="btn btn-default btn-sm" onclick="nextMonth()">下月 →</button>
+        </div>
+      </div>
+      <div id="calendarGrid"></div>
+      <div style="margin-top: 12px; font-size: 12px; color: #666;">
+        <span style="display:inline-block;width:12px;height:12px;background:#1a73e8;margin-right:4px;vertical-align:middle;"></span> 已订
+        <span style="display:inline-block;width:12px;height:12px;background:#ff9800;margin-right:4px;margin-left:12px;vertical-align:middle;"></span> 清洁日
+        <span style="margin-left: 12px;">💡 点击日期格子可以快速下单</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="page" id="page-orders">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>订单列表</h3>
+        <div style="display:flex;gap:8px;">
+          <select id="orderStatusFilter" onchange="loadOrders()">
+            <option value="">全部状态</option>
+            <option value="pending">待确认</option>
+            <option value="confirmed">已确认</option>
+            <option value="checked_in">入住中</option>
+            <option value="checked_out">已退房</option>
+            <option value="cancelled">已取消</option>
+          </select>
+          <button class="btn btn-primary" onclick="openOrderModal()">+ 新建订单</button>
+        </div>
+      </div>
+      <div id="ordersTable"></div>
+    </div>
+  </div>
+
+  <div class="page" id="page-rooms">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>房源列表</h3>
+        <button class="btn btn-primary" onclick="openRoomModal()">+ 添加房源</button>
+      </div>
+      <div id="roomsTable"></div>
+    </div>
+  </div>
+
+  <div class="page" id="page-cleanings">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>清洁排期</h3>
+        <input type="date" id="cleaningDateFilter" onchange="loadCleanings()" style="padding:6px 10px;border:1px solid #ddd;border-radius:4px;">
+      </div>
+      <div id="cleaningsTable"></div>
+    </div>
+  </div>
+
+  <div class="page" id="page-stats">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>月度统计</h3>
+        <div style="display:flex;gap:8px;">
+          <select id="statsYear" onchange="loadStats()"></select>
+          <select id="statsMonth" onchange="loadStats()">
+            <option value="1">1月</option><option value="2">2月</option><option value="3">3月</option>
+            <option value="4">4月</option><option value="5">5月</option><option value="6">6月</option>
+            <option value="7">7月</option><option value="8">8月</option><option value="9">9月</option>
+            <option value="10">10月</option><option value="11">11月</option><option value="12">12月</option>
+          </select>
+        </div>
+      </div>
+      <div class="stats-grid" id="statsOverview"></div>
+      <div id="statsTable"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="modal" id="roomModal">
+  <div class="modal-content">
+    <h3 id="roomModalTitle">添加房源</h3>
+    <input type="hidden" id="roomId">
+    <div class="form-group">
+      <label>房源名称 *</label>
+      <input type="text" id="roomName" placeholder="如：海景大床房">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>可住人数</label>
+        <input type="number" id="roomCapacity" value="2" min="1">
+      </div>
+      <div class="form-group">
+        <label>几室</label>
+        <input type="number" id="roomBedrooms" value="1" min="1">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>设施描述</label>
+      <textarea id="roomFacilities" rows="2" placeholder="如：空调、WiFi、独立卫浴"></textarea>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>入住时间</label>
+        <input type="time" id="roomCheckInTime" value="14:00">
+      </div>
+      <div class="form-group">
+        <label>退房时间</label>
+        <input type="time" id="roomCheckOutTime" value="12:00">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>平日价格（元/晚）</label>
+        <input type="number" id="roomWeekdayPrice" value="200" min="0">
+      </div>
+      <div class="form-group">
+        <label>周末价格（元/晚）</label>
+        <input type="number" id="roomWeekendPrice" value="300" min="0">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>节假日价格（元/晚）</label>
+      <input type="number" id="roomHolidayPrice" value="400" min="0">
+      <div class="tip">暂未实现自动识别节假日，可后续扩展</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeRoomModal()">取消</button>
+      <button class="btn btn-primary" onclick="saveRoom()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="orderModal">
+  <div class="modal-content">
+    <h3>新建订单</h3>
+    <div class="form-group">
+      <label>选择房源 *</label>
+      <select id="orderRoomId" onchange="checkPrice()">
+        <option value="">请选择房源</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>入住日期 *</label>
+        <input type="date" id="orderCheckIn" onchange="checkPrice()">
+      </div>
+      <div class="form-group">
+        <label>退房日期 *</label>
+        <input type="date" id="orderCheckOut" onchange="checkPrice()">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>客人姓名 *</label>
+      <input type="text" id="orderGuestName">
+    </div>
+    <div class="form-group">
+      <label>联系电话</label>
+      <input type="text" id="orderGuestPhone">
+    </div>
+    <div id="pricePreview" style="padding:12px;background:#f8f9fa;border-radius:4px;margin-bottom:16px;display:none;">
+      <div style="font-size:14px;color:#666;">共 <span id="priceNights">0</span> 晚</div>
+      <div style="font-size:24px;font-weight:bold;color:#1a73e8;margin-top:4px;">¥ <span id="priceTotal">0</span></div>
+      <div id="priceWarning" style="color:#e53935;font-size:12px;margin-top:4px;display:none;">⚠️ 该时段已有订单，无法下单</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeOrderModal()">取消</button>
+      <button class="btn btn-primary" onclick="createOrder()">确认下单</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="orderDetailModal">
+  <div class="modal-content">
+    <h3>订单详情</h3>
+    <div id="orderDetail"></div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeOrderDetailModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentDate = new Date();
+let rooms = [];
+let calendarData = { orders: [], cleanings: [] };
+
+function $(id) { return document.getElementById(id); }
+
+function toast(msg, type = 'success') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+async function api(url, options = {}) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || '请求失败');
+  }
+  return data;
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('page-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'orders') loadOrders();
+    if (tab.dataset.tab === 'rooms') loadRooms();
+    if (tab.dataset.tab === 'cleanings') loadCleanings();
+    if (tab.dataset.tab === 'stats') loadStats();
+  });
+});
+
+async function loadRooms() {
+  try {
+    rooms = await api('/api/rooms');
+    renderRoomsTable();
+    renderRoomSelects();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderRoomsTable() {
+  if (rooms.length === 0) {
+    $('roomsTable').innerHTML = '<div class="empty">暂无房源，点击右上角添加</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>ID</th><th>名称</th><th>可住</th><th>室数</th><th>平日价</th><th>周末价</th><th>节假日价</th><th>入住/退房</th><th>操作</th></tr></thead><tbody>';
+  for (const r of rooms) {
+    html += `<tr>
+      <td>${r.id}</td>
+      <td><strong>${r.name}</strong></td>
+      <td>${r.capacity}人</td>
+      <td>${r.bedrooms}室</td>
+      <td>¥${r.weekday_price}</td>
+      <td>¥${r.weekend_price}</td>
+      <td>¥${r.holiday_price}</td>
+      <td>${r.check_in_time} / ${r.check_out_time}</td>
+      <td>
+        <button class="btn btn-default btn-sm" onclick="editRoom(${r.id})">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteRoom(${r.id})">删除</button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('roomsTable').innerHTML = html;
+}
+
+function renderRoomSelects() {
+  const calSel = $('calendarRoom');
+  const curVal = calSel.value;
+  calSel.innerHTML = '<option value="">全部房源</option>';
+  for (const r of rooms) {
+    calSel.innerHTML += `<option value="${r.id}">${r.name}</option>`;
+  }
+  calSel.value = curVal;
+
+  const orderSel = $('orderRoomId');
+  const curVal2 = orderSel.value;
+  orderSel.innerHTML = '<option value="">请选择房源</option>';
+  for (const r of rooms) {
+    orderSel.innerHTML += `<option value="${r.id}">${r.name}</option>`;
+  }
+  orderSel.value = curVal2;
+}
+
+function openRoomModal() {
+  $('roomModalTitle').textContent = '添加房源';
+  $('roomId').value = '';
+  $('roomName').value = '';
+  $('roomCapacity').value = 2;
+  $('roomBedrooms').value = 1;
+  $('roomFacilities').value = '';
+  $('roomCheckInTime').value = '14:00';
+  $('roomCheckOutTime').value = '12:00';
+  $('roomWeekdayPrice').value = 200;
+  $('roomWeekendPrice').value = 300;
+  $('roomHolidayPrice').value = 400;
+  $('roomModal').classList.add('active');
+}
+
+function closeRoomModal() {
+  $('roomModal').classList.remove('active');
+}
+
+async function editRoom(id) {
+  const room = rooms.find(r => r.id === id);
+  if (!room) return;
+  $('roomModalTitle').textContent = '编辑房源';
+  $('roomId').value = room.id;
+  $('roomName').value = room.name;
+  $('roomCapacity').value = room.capacity;
+  $('roomBedrooms').value = room.bedrooms;
+  $('roomFacilities').value = room.facilities || '';
+  $('roomCheckInTime').value = room.check_in_time;
+  $('roomCheckOutTime').value = room.check_out_time;
+  $('roomWeekdayPrice').value = room.weekday_price;
+  $('roomWeekendPrice').value = room.weekend_price;
+  $('roomHolidayPrice').value = room.holiday_price;
+  $('roomModal').classList.add('active');
+}
+
+async function saveRoom() {
+  const id = $('roomId').value;
+  const data = {
+    name: $('roomName').value,
+    capacity: parseInt($('roomCapacity').value),
+    bedrooms: parseInt($('roomBedrooms').value),
+    facilities: $('roomFacilities').value,
+    check_in_time: $('roomCheckInTime').value,
+    check_out_time: $('roomCheckOutTime').value,
+    weekday_price: parseFloat($('roomWeekdayPrice').value),
+    weekend_price: parseFloat($('roomWeekendPrice').value),
+    holiday_price: parseFloat($('roomHolidayPrice').value),
+  };
+  try {
+    if (id) {
+      await api('/api/rooms/' + id, { method: 'PUT', body: JSON.stringify(data) });
+      toast('更新成功');
+    } else {
+      await api('/api/rooms', { method: 'POST', body: JSON.stringify(data) });
+      toast('添加成功');
+    }
+    closeRoomModal();
+    loadRooms();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteRoom(id) {
+  if (!confirm('确定删除该房源吗？')) return;
+  try {
+    await api('/api/rooms/' + id, { method: 'DELETE' });
+    toast('删除成功');
+    loadRooms();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function prevMonth() {
+  currentDate.setMonth(currentDate.getMonth() - 1);
+  renderCalendar();
+}
+function nextMonth() {
+  currentDate.setMonth(currentDate.getMonth() + 1);
+  renderCalendar();
+}
+function today() {
+  currentDate = new Date();
+  renderCalendar();
+}
+
+async function renderCalendar() {
+  const year = currentDate.getFullYear();
+  const month = currentDate.getMonth();
+  $('calendarTitle').textContent = year + '年' + (month + 1) + '月';
+
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const startDate = new Date(firstDay);
+  startDate.setDate(startDate.getDate() - firstDay.getDay());
+  const endDate = new Date(lastDay);
+  endDate.setDate(endDate.getDate() + (6 - lastDay.getDay()) + 1);
+
+  const startStr = formatDate(startDate);
+  const endStr = formatDate(endDate);
+
+  const roomId = $('calendarRoom').value;
+  let url = '/api/calendar?start=' + startStr + '&end=' + endStr;
+  if (roomId) url += '&room_id=' + roomId;
+
+  try {
+    calendarData = await api(url);
+    const displayRooms = roomId ? rooms.filter(r => r.id == roomId) : rooms;
+
+    let html = '<div class="cal-cell header"></div>';
+    const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    for (let i = 0; i < 7; i++) {
+      html += `<div class="cal-cell header">${weekDays[i]}</div>`;
+    }
+
+    const days = [];
+    let d = new Date(startDate);
+    while (d < endDate) {
+      days.push(new Date(d));
+      d.setDate(d.getDate() + 1);
+    }
+
+    for (const room of displayRooms) {
+      html += `<div class="cal-cell room-col">${room.name}</div>`;
+      for (const day of days) {
+        const dayStr = formatDate(day);
+        const isThisMonth = day.getMonth() === month;
+        const isWeekend = day.getDay() === 0 || day.getDay() === 6;
+        const isToday = formatDate(new Date()) === dayStr;
+
+        let cellClass = 'cal-cell';
+        if (!isThisMonth) cellClass += ' other-month';
+        else if (isWeekend) cellClass += ' weekend';
+
+        const dayOrders = calendarData.orders.filter(o =>
+          o.room_id === room.id && dayStr >= o.check_in && dayStr < o.check_out
+        );
+        const dayCleanings = calendarData.cleanings.filter(c =>
+          c.room_id === room.id && c.cleaning_date === dayStr && c.status !== 'cancelled'
+        );
+
+        let barsHtml = '';
+        for (const o of dayOrders) {
+          let barClass = 'order-bar';
+          if (o.check_in === dayStr) barClass += ' start';
+          if (o.check_out === formatDate(addDays(new Date(dayStr), 1))) barClass += ' end';
+          barsHtml += `<div class="${barClass}" onclick="showOrderDetail(${o.id})" title="${o.guest_name} - ¥${o.total_price}">${o.guest_name}</div>`;
+        }
+        for (const c of dayCleanings) {
+          barsHtml += `<div class="cleaning">🧹 清洁</div>`;
+        }
+
+        const todayStyle = isToday ? 'font-weight:bold;color:#1a73e8;' : '';
+
+        html += `<div class="${cellClass}" onclick="quickCreateOrder(${room.id}, '${dayStr}')">
+          <div class="date" style="${todayStyle}">${day.getDate()}</div>
+          ${barsHtml}
+        </div>`;
+      }
+    }
+
+    if (displayRooms.length === 0) {
+      html = '<div class="empty" style="grid-column:1/-1;">暂无房源，请先添加房源</div>';
+    }
+
+    $('calendarGrid').innerHTML = html;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function formatDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+function addDays(d, n) {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+function quickCreateOrder(roomId, dateStr) {
+  $('orderRoomId').value = roomId;
+  $('orderCheckIn').value = dateStr;
+  const nextDay = addDays(new Date(dateStr), 1);
+  $('orderCheckOut').value = formatDate(nextDay);
+  $('orderGuestName').value = '';
+  $('orderGuestPhone').value = '';
+  $('pricePreview').style.display = 'none';
+  $('orderModal').classList.add('active');
+  setTimeout(checkPrice, 10);
+}
+
+function openOrderModal() {
+  $('orderRoomId').value = '';
+  $('orderCheckIn').value = '';
+  $('orderCheckOut').value = '';
+  $('orderGuestName').value = '';
+  $('orderGuestPhone').value = '';
+  $('pricePreview').style.display = 'none';
+  $('orderModal').classList.add('active');
+}
+
+function closeOrderModal() {
+  $('orderModal').classList.remove('active');
+}
+
+async function checkPrice() {
+  const roomId = $('orderRoomId').value;
+  const checkIn = $('orderCheckIn').value;
+  const checkOut = $('orderCheckOut').value;
+  if (!roomId || !checkIn || !checkOut) return;
+
+  try {
+    const data = await api('/api/orders/check-price', {
+      method: 'POST',
+      body: JSON.stringify({ room_id: parseInt(roomId), check_in: checkIn, check_out: checkOut })
+    });
+    $('pricePreview').style.display = 'block';
+    $('priceNights').textContent = data.nights;
+    $('priceTotal').textContent = data.total;
+    $('priceWarning').style.display = data.available ? 'none' : 'block';
+    if (!data.available) {
+      $('priceWarning').textContent = '⚠️ 该时段已有订单，无法下单';
+    }
+  } catch (e) {
+    $('pricePreview').style.display = 'block';
+    $('priceWarning').style.display = 'block';
+    $('priceWarning').textContent = '⚠️ ' + e.message;
+  }
+}
+
+async function createOrder() {
+  const roomId = $('orderRoomId').value;
+  const checkIn = $('orderCheckIn').value;
+  const checkOut = $('orderCheckOut').value;
+  const guestName = $('orderGuestName').value;
+  const guestPhone = $('orderGuestPhone').value;
+
+  if (!roomId || !checkIn || !checkOut || !guestName) {
+    toast('请填写完整信息', 'error');
+    return;
+  }
+
+  try {
+    await api('/api/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        room_id: parseInt(roomId),
+        check_in: checkIn,
+        check_out: checkOut,
+        guest_name: guestName,
+        guest_phone: guestPhone,
+      })
+    });
+    toast('下单成功！');
+    closeOrderModal();
+    renderCalendar();
+    loadOrders();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadOrders() {
+  try {
+    let url = '/api/orders';
+    const status = $('orderStatusFilter').value;
+    if (status) url += '?status=' + status;
+    const orders = await api(url);
+    renderOrdersTable(orders);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderOrdersTable(orders) {
+  if (orders.length === 0) {
+    $('ordersTable').innerHTML = '<div class="empty">暂无订单</div>';
+    return;
+  }
+  const statusMap = {
+    pending: ['待确认', 'status-pending'],
+    confirmed: ['已确认', 'status-confirmed'],
+    checked_in: ['入住中', 'status-checked_in'],
+    checked_out: ['已退房', 'status-checked_out'],
+    cancelled: ['已取消', 'status-cancelled'],
+  };
+  let html = '<table><thead><tr><th>ID</th><th>房源</th><th>客人</th><th>入住</th><th>退房</th><th>晚数</th><th>金额</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  for (const o of orders) {
+    const [statusText, statusClass] = statusMap[o.status] || [o.status, ''];
+    html += `<tr>
+      <td>#${o.id}</td>
+      <td>${o.room_name}</td>
+      <td>${o.guest_name}<br><span style="color:#999;font-size:12px;">${o.guest_phone || ''}</span></td>
+      <td>${o.check_in}</td>
+      <td>${o.check_out}</td>
+      <td>${o.nights}晚</td>
+      <td>¥${o.total_price}</td>
+      <td><span class="status ${statusClass}">${statusText}</span></td>
+      <td>
+        <button class="btn btn-default btn-sm" onclick="showOrderDetail(${o.id})">详情</button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('ordersTable').innerHTML = html;
+}
+
+async function showOrderDetail(id) {
+  try {
+    const o = await api('/api/orders/' + id);
+    const statusMap = {
+      pending: '待确认',
+      confirmed: '已确认',
+      checked_in: '入住中',
+      checked_out: '已退房',
+      cancelled: '已取消',
+    };
+    let html = `
+      <div style="font-size:14px;line-height:2;">
+        <p><strong>订单号：</strong>#${o.id}</p>
+        <p><strong>房源：</strong>${o.room_name}</p>
+        <p><strong>客人姓名：</strong>${o.guest_name}</p>
+        <p><strong>联系电话：</strong>${o.guest_phone || '-'}</p>
+        <p><strong>入住日期：</strong>${o.check_in} ${o.check_in_time || ''}</p>
+        <p><strong>退房日期：</strong>${o.check_out} ${o.check_out_time || ''}</p>
+        <p><strong>入住晚数：</strong>${o.nights}晚</p>
+        <p><strong>订单金额：</strong><span style="font-size:20px;font-weight:bold;color:#1a73e8;">¥${o.total_price}</span></p>
+        <p><strong>订单状态：</strong><span class="status status-${o.status}">${statusMap[o.status] || o.status}</span></p>
+        ${o.status === 'cancelled' ? `<p><strong>违约金：</strong>¥${o.cancel_fee}</p><p><strong>退款金额：</strong>¥${o.refund_amount}</p>` : ''}
+        <p><strong>创建时间：</strong>${o.created_at}</p>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">
+    `;
+    if (o.status === 'confirmed') {
+      html += `<button class="btn btn-success btn-sm" onclick="checkinOrder(${o.id})">办理入住</button>`;
+      html += `<button class="btn btn-danger btn-sm" onclick="cancelOrder(${o.id})">取消订单</button>`;
+    }
+    if (o.status === 'checked_in') {
+      html += `<button class="btn btn-primary btn-sm" onclick="checkoutOrder(${o.id})">办理退房</button>`;
+    }
+    html += '</div>';
+    $('orderDetail').innerHTML = html;
+    $('orderDetailModal').classList.add('active');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function closeOrderDetailModal() {
+  $('orderDetailModal').classList.remove('active');
+}
+
+async function checkinOrder(id) {
+  if (!confirm('确认办理入住？')) return;
+  try {
+    await api('/api/orders/' + id + '/checkin', { method: 'POST' });
+    toast('入住成功');
+    closeOrderDetailModal();
+    loadOrders();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function checkoutOrder(id) {
+  if (!confirm('确认办理退房？')) return;
+  try {
+    await api('/api/orders/' + id + '/checkout', { method: 'POST' });
+    toast('退房成功');
+    closeOrderDetailModal();
+    loadOrders();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function cancelOrder(id) {
+  if (!confirm('确认取消订单吗？将按退订规则计算违约金。')) return;
+  try {
+    const result = await api('/api/orders/' + id + '/cancel', { method: 'POST' });
+    alert('取消成功！\n' + result.cancel_rule + '\n违约金：¥' + result.cancel_fee + '\n退款：¥' + result.refund_amount);
+    closeOrderDetailModal();
+    loadOrders();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadCleanings() {
+  try {
+    let url = '/api/cleanings';
+    const date = $('cleaningDateFilter').value;
+    if (date) url += '?date=' + date;
+    const cleanings = await api(url);
+    renderCleaningsTable(cleanings);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderCleaningsTable(cleanings) {
+  if (cleanings.length === 0) {
+    $('cleaningsTable').innerHTML = '<div class="empty">暂无清洁任务</div>';
+    return;
+  }
+  const statusMap = {
+    scheduled: ['待清洁', 'status-scheduled'],
+    completed: ['已完成', 'status-completed'],
+    cancelled: ['已取消', 'status-cancelled'],
+  };
+  let html = '<table><thead><tr><th>ID</th><th>房源</th><th>清洁日期</th><th>清洁阿姨</th><th>关联订单</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  for (const c of cleanings) {
+    const [statusText, statusClass] = statusMap[c.status] || [c.status, ''];
+    html += `<tr>
+      <td>#${c.id}</td>
+      <td>${c.room_name}</td>
+      <td>${c.cleaning_date}</td>
+      <td>${c.cleaner_name}</td>
+      <td>${c.guest_name ? c.guest_name + ' 退房' : '-'}</td>
+      <td><span class="status ${statusClass}">${statusText}</span></td>
+      <td>
+        ${c.status === 'scheduled' ? `<button class="btn btn-success btn-sm" onclick="completeCleaning(${c.id})">完成</button>` : ''}
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('cleaningsTable').innerHTML = html;
+}
+
+async function completeCleaning(id) {
+  try {
+    await api('/api/cleanings/' + id + '/complete', { method: 'POST' });
+    toast('已标记完成');
+    loadCleanings();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function initStatsSelects() {
+  const yearSel = $('statsYear');
+  const now = new Date();
+  for (let y = now.getFullYear() - 1; y <= now.getFullYear() + 1; y++) {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = y + '年';
+    if (y === now.getFullYear()) opt.selected = true;
+    yearSel.appendChild(opt);
+  }
+  $('statsMonth').value = now.getMonth() + 1;
+}
+
+async function loadStats() {
+  const year = $('statsYear').value;
+  const month = $('statsMonth').value;
+  try {
+    const data = await api('/api/stats/monthly?year=' + year + '&month=' + month);
+    $('statsOverview').innerHTML = `
+      <div class="stat-card">
+        <div class="value">¥${data.total.total_revenue}</div>
+        <div class="label">总收入</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.total.total_occupied_nights}</div>
+        <div class="label">总入住晚数</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.total.avg_occupancy_rate}%</div>
+        <div class="label">平均入住率</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.rooms.length}</div>
+        <div class="label">房源数量</div>
+      </div>
+    `;
+    let html = '<table><thead><tr><th>房源</th><th>入住晚数</th><th>当月天数</th><th>入住率</th><th>收入</th></tr></thead><tbody>';
+    for (const r of data.rooms) {
+      html += `<tr>
+        <td><strong>${r.room_name}</strong></td>
+        <td>${r.occupied_nights}晚</td>
+        <td>${r.total_nights}天</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;height:8px;background:#eee;border-radius:4px;overflow:hidden;max-width:150px;">
+              <div style="height:100%;width:${r.occupancy_rate}%;background:#1a73e8;"></div>
+            </div>
+            <span>${r.occupancy_rate}%</span>
+          </div>
+        </td>
+        <td style="font-weight:bold;color:#1a73e8;">¥${r.revenue}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    $('statsTable').innerHTML = html;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function init() {
+  initStatsSelects();
+  await loadRooms();
+  renderCalendar();
+}
+
+init();
+</script>
+
+</body>
+</html>
