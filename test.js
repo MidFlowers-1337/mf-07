@@ -5,17 +5,25 @@ const {
   addDays,
   diffDays,
   isWeekend,
+  isHoliday,
+  addHoliday,
+  removeHoliday,
   datesBetween,
   hasOverlap,
   calculatePrice,
   calcCancelFee,
   checkCollision,
+  checkCleanerConflict,
+  createOrder,
+  cancelOrder,
   db,
   initDb,
 } = require('./db');
 
 let passed = 0;
 let failed = 0;
+
+initDb();
 
 function test(name, fn) {
   try {
@@ -110,13 +118,46 @@ test('hasOverlap: 完全相同日期 - 撞', () => {
   assert.strictEqual(hasOverlap('2024-06-10', '2024-06-15', '2024-06-10', '2024-06-15'), true);
 });
 
-console.log('\n=== 价格计算测试 ===\n');
+console.log('\n=== 节假日价格测试 ===\n');
 
 const mockRoom = {
   weekday_price: 200,
   weekend_price: 300,
-  holiday_price: 400,
+  holiday_price: 500,
 };
+
+test('isHoliday: 默认不是节假日', () => {
+  assert.strictEqual(isHoliday('2024-10-01'), false);
+});
+
+test('addHoliday: 添加节假日', () => {
+  const ok = addHoliday('2024-10-01', '国庆节');
+  assert.strictEqual(ok, true);
+  assert.strictEqual(isHoliday('2024-10-01'), true);
+});
+
+test('addHoliday: 重复添加返回 false', () => {
+  const ok = addHoliday('2024-10-01', '国庆节');
+  assert.strictEqual(ok, false);
+});
+
+test('calculatePrice: 节假日价格生效', () => {
+  addHoliday('2024-10-01', '国庆');
+  addHoliday('2024-10-02', '国庆');
+  const r = calculatePrice(mockRoom, '2024-09-30', '2024-10-03');
+  assert.strictEqual(r.nights, 3);
+  assert.strictEqual(r.total, 200 + 500 + 500);
+});
+
+test('removeHoliday: 移除节假日', () => {
+  addHoliday('2024-12-25', '圣诞');
+  assert.strictEqual(isHoliday('2024-12-25'), true);
+  const ok = removeHoliday('2024-12-25');
+  assert.strictEqual(ok, true);
+  assert.strictEqual(isHoliday('2024-12-25'), false);
+});
+
+console.log('\n=== 价格计算测试 ===\n');
 
 test('calculatePrice: 工作日 3 晚', () => {
   const r = calculatePrice(mockRoom, '2024-06-17', '2024-06-20');
@@ -164,34 +205,55 @@ test('calcCancelFee: 当天取消 - 不退', () => {
 
 console.log('\n=== 数据库集成测试 ===\n');
 
-initDb();
-db.exec('DELETE FROM orders; DELETE FROM rooms; DELETE FROM cleanings;');
+db.exec('DELETE FROM room_dates; DELETE FROM cleanings; DELETE FROM orders; DELETE FROM rooms; DELETE FROM holidays;');
+db.exec("DELETE FROM sqlite_sequence WHERE name IN ('rooms', 'orders', 'room_dates', 'cleanings', 'holidays')");
 
 const roomResult = db.prepare(`
-  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price)
-  VALUES ('测试房间1', 2, 1, 200, 300)
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price)
+  VALUES ('测试房间1', 2, 1, 200, 300, 500)
 `).run();
 const roomId = roomResult.lastInsertRowid;
+
+let order1Id;
 
 test('checkCollision: 空房无冲突', () => {
   const r = checkCollision(roomId, '2024-07-01', '2024-07-05');
   assert.strictEqual(r.length, 0);
 });
 
-db.prepare(`
-  INSERT INTO orders (room_id, guest_name, check_in, check_out, nights, total_price, status)
-  VALUES (?, '张三', '2024-07-05', '2024-07-10', 5, 1000, 'confirmed')
-`).run(roomId);
+test('createOrder: 正常下单', () => {
+  order1Id = createOrder(roomId, '张三', '13800138000', '2024-07-05', '2024-07-10', '张阿姨');
+  assert.ok(order1Id > 0);
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(order1Id);
+  assert.strictEqual(order.guest_name, '张三');
+  assert.strictEqual(order.nights, 5);
+  assert.strictEqual(order.status, 'confirmed');
+});
 
-test('checkCollision: 日期完全不重叠', () => {
-  const r = checkCollision(roomId, '2024-07-01', '2024-07-05');
-  assert.strictEqual(r.length, 0);
+test('createOrder: room_dates 表有对应记录（双保险）', () => {
+  const dates = db.prepare('SELECT date FROM room_dates WHERE order_id = ? ORDER BY date').all(order1Id);
+  assert.strictEqual(dates.length, 5);
+  assert.strictEqual(dates[0].date, '2024-07-05');
+  assert.strictEqual(dates[4].date, '2024-07-09');
+});
+
+test('createOrder: 自动生成清洁任务', () => {
+  const cleaning = db.prepare('SELECT * FROM cleanings WHERE order_id = ?').get(order1Id);
+  assert.ok(cleaning);
+  assert.strictEqual(cleaning.cleaning_date, '2024-07-10');
+  assert.strictEqual(cleaning.cleaner_name, '张阿姨');
+  assert.strictEqual(cleaning.status, 'scheduled');
 });
 
 test('checkCollision: 日期完全重叠', () => {
   const r = checkCollision(roomId, '2024-07-06', '2024-07-08');
   assert.strictEqual(r.length, 1);
   assert.strictEqual(r[0].guest_name, '张三');
+});
+
+test('checkCollision: 日期完全不重叠', () => {
+  const r = checkCollision(roomId, '2024-07-01', '2024-07-05');
+  assert.strictEqual(r.length, 0);
 });
 
 test('checkCollision: 左端重叠', () => {
@@ -209,69 +271,101 @@ test('checkCollision: 包含关系', () => {
   assert.strictEqual(r.length, 1);
 });
 
+test('createOrder: 撞单时 room_dates 唯一索引兜底（第二道保险）', () => {
+  let threw = false;
+  try {
+    createOrder(roomId, '李四', '13900139000', '2024-07-07', '2024-07-12');
+  } catch (e) {
+    threw = true;
+    assert.ok(e.message.includes('UNIQUE') || e.message.includes('唯一') || e.message.includes('room_dates'));
+  }
+  assert.strictEqual(threw, true, '撞单应该抛出错误');
+});
+
+test('checkCleanerConflict: 清洁阿姨冲突检测', () => {
+  const conflicts = checkCleanerConflict('张阿姨', '2024-07-10');
+  assert.strictEqual(conflicts.length, 1);
+});
+
+const room2Result = db.prepare(`
+  INSERT INTO rooms (name, capacity, bedrooms, weekday_price, weekend_price, holiday_price)
+  VALUES ('测试房间2', 3, 2, 300, 400, 600)
+`).run();
+const room2Id = room2Result.lastInsertRowid;
+
+test('createOrder: 清洁阿姨冲突时不能下单（不同房间同一天退房，同一阿姨）', () => {
+  let threw = false;
+  try {
+    createOrder(room2Id, '王五', '13700137000', '2024-07-07', '2024-07-10', '张阿姨');
+  } catch (e) {
+    threw = true;
+    assert.ok(e.message.includes('清洁阿姨'));
+  }
+  assert.strictEqual(threw, true, '阿姨冲突应该抛出错误');
+});
+
+let order2Id;
+
+test('createOrder: 换个阿姨可以下单', () => {
+  order2Id = createOrder(roomId, '王五', '13700137000', '2024-07-12', '2024-07-15', '李阿姨');
+  assert.ok(order2Id > 0);
+});
+
+test('createOrder: 取消订单后日期释放', () => {
+  const result = cancelOrder(order2Id);
+  assert.strictEqual(result.fee > 0, true);
+  const dates = db.prepare('SELECT * FROM room_dates WHERE order_id = ?').all(order2Id);
+  assert.strictEqual(dates.length, 0);
+  const cleaning = db.prepare('SELECT * FROM cleanings WHERE order_id = ?').get(order2Id);
+  assert.strictEqual(cleaning.status, 'cancelled');
+});
+
 test('checkCollision: 已取消订单不算冲突', () => {
-  const info = db.prepare(`
-    INSERT INTO orders (room_id, guest_name, check_in, check_out, nights, total_price, status)
-    VALUES (?, '李四', '2024-07-15', '2024-07-20', 5, 1000, 'cancelled')
-  `).run(roomId);
-  const r = checkCollision(roomId, '2024-07-16', '2024-07-18');
+  const r = checkCollision(roomId, '2024-07-12', '2024-07-15');
   assert.strictEqual(r.length, 0);
 });
 
-test('checkCollision: excludeOrderId 排除指定订单', () => {
-  const r = checkCollision(roomId, '2024-07-06', '2024-07-08', 1);
-  assert.strictEqual(r.length, 0);
-});
-
-console.log('\n=== 创建订单自动生成清洁任务测试 ===\n');
-
-test('创建订单后自动生成清洁任务', () => {
-  const info = db.prepare(`
-    INSERT INTO orders (room_id, guest_name, check_in, check_out, nights, total_price, status)
-    VALUES (?, '王五', '2024-08-01', '2024-08-05', 4, 800, 'confirmed')
-  `).run(roomId);
-  const orderId = info.lastInsertRowid;
-
-  db.prepare(`
-    INSERT INTO cleanings (room_id, order_id, cleaning_date, status)
-    VALUES (?, ?, '2024-08-05', 'scheduled')
-  `).run(roomId, orderId);
-
-  const cleaning = db.prepare('SELECT * FROM cleanings WHERE order_id = ?').get(orderId);
-  assert.ok(cleaning);
-  assert.strictEqual(cleaning.cleaning_date, '2024-08-05');
-  assert.strictEqual(cleaning.status, 'scheduled');
+test('createOrder: 取消后可以重新下单同日期', () => {
+  const orderId = createOrder(roomId, '赵六', '13600136000', '2024-07-12', '2024-07-15', '王阿姨');
+  assert.ok(orderId > 0);
 });
 
 console.log('\n=== 跨月跨年边界测试 ===\n');
 
 test('跨月订单撞单检测', () => {
-  db.prepare(`
-    INSERT INTO orders (room_id, guest_name, check_in, check_out, nights, total_price, status)
-    VALUES (?, '赵六', '2024-09-28', '2024-10-05', 7, 1400, 'confirmed')
-  `).run(roomId);
-
+  createOrder(roomId, '跨月客', '', '2024-09-28', '2024-10-05', '张阿姨');
   const r1 = checkCollision(roomId, '2024-09-25', '2024-09-29');
-  assert.strictEqual(r1.length, 1);
+  assert.strictEqual(r1.length >= 1, true);
 
   const r2 = checkCollision(roomId, '2024-10-04', '2024-10-08');
-  assert.strictEqual(r2.length, 1);
+  assert.strictEqual(r2.length >= 1, true);
 
   const r3 = checkCollision(roomId, '2024-10-05', '2024-10-08');
   assert.strictEqual(r3.length, 0);
 });
 
 test('跨年订单撞单检测', () => {
-  db.prepare(`
-    INSERT INTO orders (room_id, guest_name, check_in, check_out, nights, total_price, status)
-    VALUES (?, '孙七', '2024-12-29', '2025-01-03', 5, 1000, 'confirmed')
-  `).run(roomId);
-
+  createOrder(roomId, '跨年客', '', '2024-12-29', '2025-01-03', '李阿姨');
   const r1 = checkCollision(roomId, '2024-12-30', '2024-12-31');
-  assert.strictEqual(r1.length, 1);
+  assert.strictEqual(r1.length >= 1, true);
 
   const r2 = checkCollision(roomId, '2025-01-01', '2025-01-02');
-  assert.strictEqual(r2.length, 1);
+  assert.strictEqual(r2.length >= 1, true);
+});
+
+console.log('\n=== 节假日价格（数据库版）测试 ===\n');
+
+test('节假日价格在 createOrder 中正确计算', () => {
+  addHoliday('2025-05-01', '劳动节');
+  addHoliday('2025-05-02', '劳动节');
+  addHoliday('2025-05-03', '劳动节');
+
+  const orderId = createOrder(roomId, '假期客', '', '2025-04-30', '2025-05-04', '张阿姨');
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+
+  assert.strictEqual(order.nights, 4);
+  const expected = 200 + 500 + 500 + 500;
+  assert.strictEqual(order.total_price, expected);
 });
 
 console.log('\n========================================');

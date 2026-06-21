@@ -73,6 +73,8 @@ tr:hover { background: #f8f9fa; }
 .cal-cell .order-bar.start { border-top-left-radius: 4px; border-bottom-left-radius: 4px; margin-left: 0; }
 .cal-cell .order-bar.end { border-top-right-radius: 4px; border-bottom-right-radius: 4px; margin-right: 0; }
 .cal-cell .cleaning { background: #ff9800; color: #fff; padding: 1px 4px; margin-top: 2px; border-radius: 2px; font-size: 10px; }
+.cal-cell .holiday-tag { background: #e53935; color: #fff; padding: 1px 3px; border-radius: 2px; font-size: 9px; margin-left: 2px; }
+.cal-cell .workday-tag { background: #43a047; color: #fff; padding: 1px 3px; border-radius: 2px; font-size: 9px; margin-left: 2px; }
 
 .room-col { background: #f8f9fa; font-weight: 500; display: flex; align-items: center; padding: 8px; font-size: 13px; }
 
@@ -108,6 +110,7 @@ tr:hover { background: #f8f9fa; }
   <div class="tab" data-tab="orders">📋 订单管理</div>
   <div class="tab" data-tab="rooms">🏠 房源管理</div>
   <div class="tab" data-tab="cleanings">🧹 清洁排期</div>
+  <div class="tab" data-tab="holidays">🎄 节假日</div>
   <div class="tab" data-tab="stats">📊 统计报表</div>
 </div>
 
@@ -132,6 +135,8 @@ tr:hover { background: #f8f9fa; }
       <div style="margin-top: 12px; font-size: 12px; color: #666;">
         <span style="display:inline-block;width:12px;height:12px;background:#1a73e8;margin-right:4px;vertical-align:middle;"></span> 已订
         <span style="display:inline-block;width:12px;height:12px;background:#ff9800;margin-right:4px;margin-left:12px;vertical-align:middle;"></span> 清洁日
+        <span style="display:inline-block;width:12px;height:12px;background:#e53935;margin-right:4px;margin-left:12px;vertical-align:middle;"></span> 节假日
+        <span style="display:inline-block;width:12px;height:12px;background:#43a047;margin-right:4px;margin-left:12px;vertical-align:middle;"></span> 补班
         <span style="margin-left: 12px;">💡 点击日期格子可以快速下单</span>
       </div>
     </div>
@@ -174,6 +179,19 @@ tr:hover { background: #f8f9fa; }
         <input type="date" id="cleaningDateFilter" onchange="loadCleanings()" style="padding:6px 10px;border:1px solid #ddd;border-radius:4px;">
       </div>
       <div id="cleaningsTable"></div>
+    </div>
+  </div>
+
+  <div class="page" id="page-holidays">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3>节假日管理</h3>
+        <button class="btn btn-primary" onclick="openHolidayModal()">+ 添加节假日</button>
+      </div>
+      <div style="margin-bottom:12px;font-size:13px;color:#666;">
+        节假日期间自动按「节假日价格」计费，价格优先级：节假日 > 周末 > 平日
+      </div>
+      <div id="holidaysTable"></div>
     </div>
   </div>
 
@@ -243,7 +261,7 @@ tr:hover { background: #f8f9fa; }
     <div class="form-group">
       <label>节假日价格（元/晚）</label>
       <input type="number" id="roomHolidayPrice" value="400" min="0">
-      <div class="tip">暂未实现自动识别节假日，可后续扩展</div>
+      <div class="tip">已内置 2024-2026 年中国法定节假日及调休日历，节假日自动按此价格计费</div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-default" onclick="closeRoomModal()">取消</button>
@@ -279,9 +297,16 @@ tr:hover { background: #f8f9fa; }
       <label>联系电话</label>
       <input type="text" id="orderGuestPhone">
     </div>
+    <div class="form-group">
+      <label>清洁阿姨</label>
+      <input type="text" id="orderCleanerName" placeholder="如：张阿姨、李阿姨" list="cleanerList">
+      <datalist id="cleanerList"></datalist>
+      <div class="tip">同一阿姨同一天只能排一单，留空则默认为「清洁阿姨」</div>
+    </div>
     <div id="pricePreview" style="padding:12px;background:#f8f9fa;border-radius:4px;margin-bottom:16px;display:none;">
       <div style="font-size:14px;color:#666;">共 <span id="priceNights">0</span> 晚</div>
       <div style="font-size:24px;font-weight:bold;color:#1a73e8;margin-top:4px;">¥ <span id="priceTotal">0</span></div>
+      <div id="priceBreakdown" style="margin-top:8px;font-size:12px;color:#555;"></div>
       <div id="priceWarning" style="color:#e53935;font-size:12px;margin-top:4px;display:none;">⚠️ 该时段已有订单，无法下单</div>
     </div>
     <div class="modal-footer">
@@ -301,10 +326,36 @@ tr:hover { background: #f8f9fa; }
   </div>
 </div>
 
+<div class="modal" id="holidayModal">
+  <div class="modal-content">
+    <h3>添加节假日</h3>
+    <div class="form-group">
+      <label>节假日名称 *</label>
+      <input type="text" id="holidayName" placeholder="如：国庆节、春节">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>开始日期 *</label>
+        <input type="date" id="holidayStart">
+      </div>
+      <div class="form-group">
+        <label>结束日期 *</label>
+        <input type="date" id="holidayEnd">
+      </div>
+    </div>
+    <div class="tip">时间段内每天都会被标记为节假日，自动按节假日价格计费</div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeHolidayModal()">取消</button>
+      <button class="btn btn-primary" onclick="saveHoliday()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentDate = new Date();
 let rooms = [];
 let calendarData = { orders: [], cleanings: [] };
+let holidaysCache = {};
 
 function $(id) { return document.getElementById(id); }
 
@@ -337,6 +388,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'orders') loadOrders();
     if (tab.dataset.tab === 'rooms') loadRooms();
     if (tab.dataset.tab === 'cleanings') loadCleanings();
+    if (tab.dataset.tab === 'holidays') loadHolidays();
     if (tab.dataset.tab === 'stats') loadStats();
   });
 });
@@ -506,6 +558,14 @@ async function renderCalendar() {
 
   try {
     calendarData = await api(url);
+
+    let holidayUrl = '/api/holidays?start=' + startStr + '&end=' + endStr;
+    try { holidaysCache = await api(holidayUrl); } catch(e) { holidaysCache = []; }
+    const holidayMap = {};
+    for (const h of holidaysCache) {
+      holidayMap[h.date] = h;
+    }
+
     const displayRooms = roomId ? rooms.filter(r => r.id == roomId) : rooms;
 
     let html = '<div class="cal-cell header"></div>';
@@ -528,10 +588,12 @@ async function renderCalendar() {
         const isThisMonth = day.getMonth() === month;
         const isWeekend = day.getDay() === 0 || day.getDay() === 6;
         const isToday = formatDate(new Date()) === dayStr;
+        const holidayInfo = holidayMap[dayStr];
 
         let cellClass = 'cal-cell';
         if (!isThisMonth) cellClass += ' other-month';
-        else if (isWeekend) cellClass += ' weekend';
+        else if (holidayInfo && holidayInfo.holiday) cellClass += ' weekend';
+        else if (isWeekend && !(holidayInfo && holidayInfo.workday_override)) cellClass += ' weekend';
 
         const dayOrders = calendarData.orders.filter(o =>
           o.room_id === room.id && dayStr >= o.check_in && dayStr < o.check_out
@@ -541,6 +603,12 @@ async function renderCalendar() {
         );
 
         let barsHtml = '';
+        if (holidayInfo && holidayInfo.holiday) {
+          barsHtml += `<span class="holiday-tag">${holidayInfo.holiday}</span>`;
+        }
+        if (holidayInfo && holidayInfo.workday_override) {
+          barsHtml += `<span class="workday-tag">补</span>`;
+        }
         for (const o of dayOrders) {
           let barClass = 'order-bar';
           if (o.check_in === dayStr) barClass += ' start';
@@ -548,7 +616,7 @@ async function renderCalendar() {
           barsHtml += `<div class="${barClass}" onclick="showOrderDetail(${o.id})" title="${o.guest_name} - ¥${o.total_price}">${o.guest_name}</div>`;
         }
         for (const c of dayCleanings) {
-          barsHtml += `<div class="cleaning">🧹 清洁</div>`;
+          barsHtml += `<div class="cleaning">🧹 ${c.cleaner_name}</div>`;
         }
 
         const todayStyle = isToday ? 'font-weight:bold;color:#1a73e8;' : '';
@@ -590,6 +658,7 @@ function quickCreateOrder(roomId, dateStr) {
   $('orderCheckOut').value = formatDate(nextDay);
   $('orderGuestName').value = '';
   $('orderGuestPhone').value = '';
+  $('orderCleanerName').value = '';
   $('pricePreview').style.display = 'none';
   $('orderModal').classList.add('active');
   setTimeout(checkPrice, 10);
@@ -601,8 +670,10 @@ function openOrderModal() {
   $('orderCheckOut').value = '';
   $('orderGuestName').value = '';
   $('orderGuestPhone').value = '';
+  $('orderCleanerName').value = '';
   $('pricePreview').style.display = 'none';
   $('orderModal').classList.add('active');
+  loadCleanerList();
 }
 
 function closeOrderModal() {
@@ -627,10 +698,26 @@ async function checkPrice() {
     if (!data.available) {
       $('priceWarning').textContent = '⚠️ 该时段已有订单，无法下单';
     }
+    if (data.breakdown && data.breakdown.length > 0) {
+      let bdHtml = '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+      for (const b of data.breakdown) {
+        let bgColor = '#e8e8e8';
+        let textColor = '#333';
+        let label = b.name;
+        if (b.type === 'holiday') { bgColor = '#e53935'; textColor = '#fff'; }
+        else if (b.type === 'weekend') { bgColor = '#1a73e8'; textColor = '#fff'; }
+        bdHtml += `<span style="background:${bgColor};color:${textColor};padding:2px 6px;border-radius:3px;font-size:11px;">${b.date.slice(5)} ${label} ¥${b.price}</span>`;
+      }
+      bdHtml += '</div>';
+      $('priceBreakdown').innerHTML = bdHtml;
+    } else {
+      $('priceBreakdown').innerHTML = '';
+    }
   } catch (e) {
     $('pricePreview').style.display = 'block';
     $('priceWarning').style.display = 'block';
     $('priceWarning').textContent = '⚠️ ' + e.message;
+    $('priceBreakdown').innerHTML = '';
   }
 }
 
@@ -640,6 +727,7 @@ async function createOrder() {
   const checkOut = $('orderCheckOut').value;
   const guestName = $('orderGuestName').value;
   const guestPhone = $('orderGuestPhone').value;
+  const cleanerName = $('orderCleanerName').value.trim();
 
   if (!roomId || !checkIn || !checkOut || !guestName) {
     toast('请填写完整信息', 'error');
@@ -647,7 +735,7 @@ async function createOrder() {
   }
 
   try {
-    await api('/api/orders', {
+    const result = await api('/api/orders', {
       method: 'POST',
       body: JSON.stringify({
         room_id: parseInt(roomId),
@@ -655,12 +743,15 @@ async function createOrder() {
         check_out: checkOut,
         guest_name: guestName,
         guest_phone: guestPhone,
+        cleaner_name: cleanerName || undefined,
       })
     });
     toast('下单成功！');
     closeOrderModal();
     renderCalendar();
     loadOrders();
+    loadCleanings();
+    loadCleanerList();
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -906,9 +997,106 @@ async function loadStats() {
   }
 }
 
+async function loadHolidays() {
+  try {
+    const holidays = await api('/api/holidays');
+    renderHolidaysTable(holidays);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderHolidaysTable(holidays) {
+  if (holidays.length === 0) {
+    $('holidaysTable').innerHTML = '<div class="empty">暂无节假日，请添加</div>';
+    return;
+  }
+  const byName = {};
+  for (const h of holidays) {
+    if (!byName[h.holiday]) byName[h.holiday] = [];
+    byName[h.holiday].push(h.date);
+  }
+  let html = '<table><thead><tr><th>节假日</th><th>日期范围</th><th>天数</th><th>操作</th></tr></thead><tbody>';
+  for (const name in byName) {
+    const dates = byName[name].sort();
+    const start = dates[0];
+    const end = dates[dates.length - 1];
+    html += `<tr>
+      <td><strong>${name}</strong></td>
+      <td>${start} ~ ${end}</td>
+      <td>${dates.length}天</td>
+      <td>
+        <button class="btn btn-danger btn-sm" onclick="deleteHoliday('${name}')">删除</button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('holidaysTable').innerHTML = html;
+}
+
+function openHolidayModal() {
+  $('holidayName').value = '';
+  $('holidayStart').value = '';
+  $('holidayEnd').value = '';
+  $('holidayModal').classList.add('active');
+}
+
+function closeHolidayModal() {
+  $('holidayModal').classList.remove('active');
+}
+
+async function saveHoliday() {
+  const name = $('holidayName').value.trim();
+  const start = $('holidayStart').value;
+  const end = $('holidayEnd').value;
+  if (!name || !start || !end) {
+    toast('请填写完整信息', 'error');
+    return;
+  }
+  try {
+    await api('/api/holidays', {
+      method: 'POST',
+      body: JSON.stringify({ name, start, end })
+    });
+    toast('添加成功！');
+    closeHolidayModal();
+    loadHolidays();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteHoliday(name) {
+  if (!confirm('确定删除这个节假日吗？')) return;
+  try {
+    await api('/api/holidays/' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('已删除');
+    loadHolidays();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadCleanerList() {
+  try {
+    const cleanings = await api('/api/cleanings');
+    const names = [...new Set(cleanings.map(c => c.cleaner_name))];
+    const dl = $('cleanerList');
+    dl.innerHTML = '';
+    for (const n of names) {
+      const opt = document.createElement('option');
+      opt.value = n;
+      dl.appendChild(opt);
+    }
+  } catch (e) {}
+}
+
 async function init() {
   initStatsSelects();
   await loadRooms();
+  loadCleanerList();
   renderCalendar();
 }
 

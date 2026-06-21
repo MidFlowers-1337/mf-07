@@ -6,20 +6,23 @@ const {
   db,
   initDb,
   dateToStr,
-  strToDate,
-  addDays,
   diffDays,
-  datesBetween,
   calculatePrice,
-  calcCancelFee,
   checkCollision,
+  checkCleanerConflict,
+  createOrder,
+  cancelOrder,
+  getHolidays,
+  addHoliday,
+  addHolidayRange,
+  removeHoliday,
+  removeHolidayByName,
+  isHoliday,
 } = require('./db');
 
 initDb();
 
 const app = new Hono();
-
-app.use('/*', serveStatic({ root: path.join(__dirname, 'public') }));
 
 app.get('/api/rooms', (c) => {
   const rooms = db.prepare('SELECT * FROM rooms ORDER BY id').all();
@@ -108,7 +111,6 @@ app.get('/api/calendar', (c) => {
     params.push(room_id);
   }
   sql += ' ORDER BY o.room_id, o.check_in';
-
   const orders = db.prepare(sql).all(...params);
 
   let cleaningSql = `
@@ -123,7 +125,9 @@ app.get('/api/calendar', (c) => {
   }
   const cleanings = db.prepare(cleaningSql).all(...cleaningParams);
 
-  return c.json({ orders, cleanings });
+  const holidays = getHolidays(start, end);
+
+  return c.json({ orders, cleanings, holidays });
 });
 
 app.get('/api/orders', (c) => {
@@ -172,79 +176,58 @@ app.post('/api/orders/check-price', async (c) => {
 
 app.post('/api/orders', async (c) => {
   const body = await c.req.json();
-  const { room_id, guest_name, guest_phone, check_in, check_out } = body;
+  const { room_id, guest_name, guest_phone, check_in, check_out, cleaner_name } = body;
 
   if (!room_id || !guest_name || !check_in || !check_out) {
     return c.json({ error: '缺少必填字段' }, 400);
   }
   if (check_in >= check_out) return c.json({ error: '入住日期必须早于退房日期' }, 400);
 
-  const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(room_id);
-  if (!room) return c.json({ error: '房源不存在' }, 404);
+  try {
+    const orderId = createOrder(
+      parseInt(room_id),
+      guest_name,
+      guest_phone || '',
+      check_in,
+      check_out,
+      cleaner_name || '清洁阿姨'
+    );
 
-  const collisions = checkCollision(room_id, check_in, check_out);
-  if (collisions.length > 0) {
-    return c.json({
-      error: '日期冲突，该时段已有订单',
-      collisions
-    }, 409);
+    const order = db.prepare(`
+      SELECT o.*, r.name as room_name
+      FROM orders o
+      LEFT JOIN rooms r ON o.room_id = r.id
+      WHERE o.id = ?
+    `).get(orderId);
+
+    return c.json(order);
+  } catch (e) {
+    const msg = e.message;
+    if (msg.includes('UNIQUE') || msg.includes('唯一索引') || msg.includes('room_dates')) {
+      const collisions = checkCollision(parseInt(room_id), check_in, check_out);
+      return c.json({ error: '日期冲突，该时段已有订单', collisions }, 409);
+    }
+    if (msg.includes('清洁阿姨')) {
+      return c.json({ error: msg }, 409);
+    }
+    return c.json({ error: msg }, 400);
   }
-
-  const { total, nights } = calculatePrice(room, check_in, check_out);
-
-  const info = db.prepare(`
-    INSERT INTO orders (room_id, guest_name, guest_phone, check_in, check_out, nights, total_price, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed')
-  `).run(room_id, guest_name, guest_phone || '', check_in, check_out, nights, total);
-
-  const orderId = info.lastInsertRowid;
-
-  db.prepare(`
-    INSERT INTO cleanings (room_id, order_id, cleaning_date, status)
-    VALUES (?, ?, ?, 'scheduled')
-  `).run(room_id, orderId, check_out);
-
-  const order = db.prepare(`
-    SELECT o.*, r.name as room_name
-    FROM orders o
-    LEFT JOIN rooms r ON o.room_id = r.id
-    WHERE o.id = ?
-  `).get(orderId);
-
-  return c.json(order);
 });
 
 app.post('/api/orders/:id/cancel', async (c) => {
-  const id = c.req.param('id');
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
-  if (!order) return c.json({ error: '订单不存在' }, 404);
-  if (order.status === 'cancelled') return c.json({ error: '订单已取消' }, 400);
-
-  const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(order.room_id);
-  const today = dateToStr(new Date());
-  const { fee, refund, rule } = calcCancelFee(room, order.check_in, order.check_out, today);
-
-  db.prepare(`
-    UPDATE orders SET
-      status = 'cancelled',
-      cancel_fee = ?,
-      refund_amount = ?,
-      updated_at = datetime('now', 'localtime')
-    WHERE id = ?
-  `).run(fee, refund, id);
-
-  db.prepare(`
-    UPDATE cleanings SET status = 'cancelled' WHERE order_id = ?
-  `).run(id);
-
-  const updated = db.prepare(`
-    SELECT o.*, r.name as room_name
-    FROM orders o
-    LEFT JOIN rooms r ON o.room_id = r.id
-    WHERE o.id = ?
-  `).get(id);
-
-  return c.json({ ...updated, cancel_rule: rule });
+  const id = parseInt(c.req.param('id'));
+  try {
+    const { fee, refund, rule } = cancelOrder(id);
+    const updated = db.prepare(`
+      SELECT o.*, r.name as room_name
+      FROM orders o
+      LEFT JOIN rooms r ON o.room_id = r.id
+      WHERE o.id = ?
+    `).get(id);
+    return c.json({ ...updated, cancel_rule: rule, cancel_fee: fee, refund_amount: refund });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
 });
 
 app.post('/api/orders/:id/checkin', (c) => {
@@ -292,6 +275,51 @@ app.post('/api/cleanings/:id/complete', (c) => {
   db.prepare(`UPDATE cleanings SET status = 'completed' WHERE id = ?`).run(id);
   const c2 = db.prepare('SELECT * FROM cleanings WHERE id = ?').get(id);
   return c.json(c2);
+});
+
+app.post('/api/cleanings', async (c) => {
+  const body = await c.req.json();
+  const { room_id, cleaning_date, cleaner_name, notes } = body;
+  if (!room_id || !cleaning_date) return c.json({ error: '缺少必填字段' }, 400);
+
+  const cleaner = cleaner_name || '清洁阿姨';
+  const conflicts = checkCleanerConflict(cleaner, cleaning_date);
+  if (conflicts.length > 0) {
+    return c.json({ error: `清洁阿姨(${cleaner})当天已有安排`, conflicts }, 409);
+  }
+
+  const info = db.prepare(`
+    INSERT INTO cleanings (room_id, cleaning_date, cleaner_name, notes, status)
+    VALUES (?, ?, ?, ?, 'scheduled')
+  `).run(room_id, cleaning_date, cleaner, notes || '');
+  const cleaning = db.prepare('SELECT * FROM cleanings WHERE id = ?').get(info.lastInsertRowid);
+  return c.json(cleaning);
+});
+
+app.get('/api/holidays', (c) => {
+  const { start, end } = c.req.query();
+  const holidays = getHolidays(start, end);
+  return c.json(holidays);
+});
+
+app.post('/api/holidays', async (c) => {
+  const body = await c.req.json();
+  const { date, start, end, name } = body;
+  if (start && end) {
+    const count = addHolidayRange(start, end, name || '');
+    return c.json({ ok: true, count, name: name || '' });
+  }
+  if (!date) return c.json({ error: '日期必填' }, 400);
+  const ok = addHoliday(date, name || '');
+  if (!ok) return c.json({ error: '该日期已设置为节假日' }, 400);
+  return c.json({ ok: true, date, name: name || '' });
+});
+
+app.delete('/api/holidays/:name', (c) => {
+  const name = decodeURIComponent(c.req.param('name'));
+  const ok = removeHolidayByName(name);
+  if (!ok) return c.json({ error: '未找到该节假日' }, 404);
+  return c.json({ ok: true });
 });
 
 app.get('/api/stats/monthly', (c) => {
@@ -352,7 +380,9 @@ app.get('/api/stats/monthly', (c) => {
   return c.json({ year: y, month: m, days_in_month: daysInMonth, rooms: result, total });
 });
 
-const port = 6000;
+app.use('/*', serveStatic({ root: path.join(__dirname, 'public') }));
+
+const port = 8888;
 console.log(`民宿管理系统启动中...`);
 console.log(`http://localhost:${port}`);
 
